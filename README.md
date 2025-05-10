@@ -39,10 +39,10 @@ The script supports multiple FP8 formats and several distinct stochastic roundin
     * For a given input value $v$:
       1. The sign, exponent ($e$), and mantissa ($m$) are extracted.
       2. The mantissa is scaled based on the target FP8 format's mantissa bits (MANTISSA_BITS). For normal numbers:
-        $$ m_{\text{scaled}} = \left( \frac{|v|}{2^{e - \text{EXPONENT_BIAS}}} - 1.0 \right) \times 2^{\text{MANTISSA_BITS}} $$
+        $$ m_{\mathrm{scaled}} = \left( \frac{|v|}{2^{e - \mathrm{EXPONENT\_BIAS}}} - 1.0 \right) \times 2^{\mathrm{MANTISSA\_BITS}} $$
         A similar calculation is done for subnormal numbers.
-      3. A uniform random number $u \sim U[0,1)$ is added to $m_{\text{scaled}}$: $m_{\text{stoch}} = \lfloor m_{\text{scaled}} + u \rfloor$.
-      4. The stochastically rounded mantissa $m_{\text{final}} = m_{\text{stoch}} / 2^{\text{MANTISSA_BITS}}$ is used to reconstruct the number.
+      3. A uniform random number $u \sim U[0,1)$ is added to $m_{\mathrm{scaled}}$: $m_{\mathrm{stoch}} = \lfloor m_{\mathrm{scaled}} + u \rfloor$.
+      4. The stochastically rounded mantissa $m_{\mathrm{final}} = m_{\mathrm{stoch}} / 2^{\mathrm{MANTISSA\_BITS}}$ is used to reconstruct the number.
       5. The number is then reconstructed from the sign, original exponent, and the new stochastically rounded mantissa, and finally cast to the target FP8 type.
     * This method includes logic for handling normal and subnormal numbers, and tensor slicing for large tensors to manage memory/computation. It uses a dedicated random number generator seeded by the `--seed` argument.
 * **Per-Tensor Max-Absolute Scaling (Owlscale)** (`--owlscale`):
