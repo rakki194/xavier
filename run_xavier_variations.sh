@@ -10,7 +10,7 @@ INPUT_FILE="/home/kade/toolkit/diffusion/comfy/models/unet/chroma-unlocked-v29.s
 MODEL_BASENAME=$(basename "$INPUT_FILE" .safetensors)
 
 # Directory where all outputs (models and plots) will be saved
-BASE_OUTPUT_DIR="xavier_quant_runs_${MODEL_BASENAME}"
+BASE_OUTPUT_DIR="/home/kade/toolkit/diffusion/comfy/models/unet/" # Modified to save models directly to the specified path
 
 # Path to the xavier.py script
 XAVIER_SCRIPT="./xavier.py" # Assumes xavier.py is in the same directory as this script
