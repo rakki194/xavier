@@ -828,6 +828,15 @@ def main():
     plots_generated_count = 0
 
     for i, (key, tensor) in enumerate(state_dict.items()):
+        original_tensor_for_plot_and_type = (
+            None  # Store original tensor for plotting and its dtype
+        )
+        if args.plot and plots_generated_count < args.plot_max_tensors:
+            original_tensor_for_plot_and_type = tensor.detach().clone().cpu()
+
+        # This variable will store the scale factor if ComfyUI-style scaling is used
+        scale_factor_for_comfyui_to_save = None
+
         if args.debug:
             print(
                 f"DEBUG main loop for tensor {key}: complex_flag={args.complex_rounding}, shifturb_flag={args.shifturb}, owlshift_flag={args.owlshift}, owlscale_flag={args.owlscale}"
@@ -851,108 +860,173 @@ def main():
             args.device
         )  # Move to target device for processing
 
-        original_tensor_for_plot_and_type = (
-            None  # Store original tensor for plotting and its dtype
-        )
-        if args.plot and plots_generated_count < args.plot_max_tensors:
-            original_tensor_for_plot_and_type = tensor.detach().clone().cpu()
-
-        dequant_scale_factor_for_owlscale = None  # Initialize here
+        # tensor_actually_scaled = False # Flag to track if owlscale was applied to this tensor - Replaced by ComfyUI style
 
         if (
-            any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
+            args.owlscale  # This block now implements ComfyUI-compatible scaled FP8
+            and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
             and tensor_to_process.is_floating_point()
+            and (
+                not key.endswith(".bias")
+            )  # Exclude bias from ComfyUI-style owlscale path
         ):
-            tensor_actually_scaled = (
-                False  # Flag to track if owlscale was applied to this tensor
-            )
-            if args.owlscale and key.endswith(
-                ".weight"
-            ):  # Apply owlscale only to .weight tensors
-                print(" (Applying owlscale pre-processing to weight tensor)...", end="")
-                tensor_to_process, dequant_scale_factor_for_owlscale = (
-                    apply_owlscale_preprocess(
-                        tensor_to_process,
-                        fp8_dtype,
-                        OWLSCALE_FP8_MIN,
-                        OWLSCALE_FP8_MAX,
-                        OWLSCALE_FP8_MIN_POS,
-                        OWLSCALE_COMPUTE_DTYPE,
-                        debug_mode=args.debug,  # Pass debug flag
-                    )
-                )
-                tensor_actually_scaled = True  # Mark that scaling was done
-                # Store the dequant scale factor, specific to .weight keys
-                scale_key = key.replace(".weight", ".scale_weight")
-                quantized_state_dict[scale_key] = dequant_scale_factor_for_owlscale.to(
-                    OWLSCALE_SCALE_DTYPE
-                ).to(original_tensor_device)
-                if args.debug:
-                    if tensor_to_process.numel() > 0:
-                        print(
-                            f"  Tensor {key} AFTER owlscale_preprocess (input to stochastic_round): min={tensor_to_process.min().item():.4g}, max={tensor_to_process.max().item():.4g}, mean={tensor_to_process.mean().item():.4g}, isfinite={torch.isfinite(tensor_to_process).all().item()}, dtype={tensor_to_process.dtype}"
-                        )
-                    else:
-                        print(
-                            f"  Tensor {key} AFTER owlscale_preprocess (input to stochastic_round) is empty."
-                        )
-            elif args.owlscale and not key.endswith(".weight"):
-                if args.debug:
-                    print(f"  DEBUG: Skipping owlscale for non-weight tensor: {key}")
+            print(" (Applying ComfyUI-style scaled FP8 quantization)...", end="")
 
-            print(" -> Quantizing...", end="")
+            # 1. Determine scale_factor_for_comfyui (this will be saved as layer.scale_info[0] or similar)
+            original_hp_tensor = tensor_to_process.to(
+                OWLSCALE_COMPUTE_DTYPE
+            )  # Use a high-precision dtype for abs_max
+            abs_max = torch.max(torch.abs(original_hp_tensor))
+
+            # Use abs_max as the scale, ensuring it's not too small.
+            # This normalizes the tensor to roughly [-1, 1] before quantization.
+            scale_factor_for_comfyui_val = abs_max.clamp(min=1e-12)
+
+            # This is the actual scale value that will be saved (e.g., as model.0.scale for ComfyUI)
+            scale_factor_for_comfyui_to_save = scale_factor_for_comfyui_val.to(
+                OWLSCALE_SCALE_DTYPE
+            ).to(original_tensor_device)
+
+            # 2. Prepare tensor for quantization: original_tensor / scale
+            # Perform division in high precision, then cast back to original tensor's dtype for stochastic rounder
+            # Ensure tensor_to_process is compatible with scale_factor_for_comfyui_val's dtype for division
+            input_for_quantization_hp = (
+                tensor_to_process.to(scale_factor_for_comfyui_val.dtype)
+                / scale_factor_for_comfyui_val
+            )
+            # The stochastic rounders might have their own dtype expectations (e.g., owlshift uses .half() internally)
+            # but they operate on the input tensor's original dtype after this scaling.
+            input_for_quantization = input_for_quantization_hp.to(
+                tensor_to_process.dtype
+            )
+
+            if args.debug:
+                if input_for_quantization.numel() > 0:
+                    print(
+                        f"  Tensor {key} input_for_quantization (orig / scale): min={input_for_quantization.min().item():.4g}, max={input_for_quantization.max().item():.4g}, mean={input_for_quantization.mean().item():.4g}, isfinite={torch.isfinite(input_for_quantization).all().item()}, dtype={input_for_quantization.dtype}"
+                    )
+                else:
+                    print(
+                        f"  Tensor {key} input_for_quantization (orig / scale) is empty."
+                    )
+
+            # 3. Quantize the scaled tensor
             quantized_tensor = stochastic_round_tensor_to_fp8(
-                tensor_to_process,
+                input_for_quantization,
                 fp8_dtype,
                 args.complex_rounding,
                 args.shifturb,
                 args.owlshift,
-                seed=main_seed + i,  # Pass seed, vary per tensor
+                seed=main_seed + i,
                 debug_mode=args.debug,
             )
-            quantized_state_dict[key] = quantized_tensor.to(
-                original_tensor_device
-            )  # Move back to original or CPU for saving
-            quantized_count += 1
-            print(f" Done. New dtype: {quantized_tensor.dtype}")
-            if args.owlscale and dequant_scale_factor_for_owlscale is not None:
+
+            # 4. Save quantized tensor and the scale factor
+            quantized_state_dict[key] = quantized_tensor.to(original_tensor_device)
+
+            # Determine the key for the scale factor
+            scale_key_parts = key.split(".")
+            if scale_key_parts[-1] == "weight":
+                scale_key_parts[-1] = (
+                    "scale_weight"  # Or what ComfyUI expects, e.g., "scale_info.0"
+                )
+                scale_key = ".".join(scale_key_parts)
+            else:  # Fallback for non-weight keys if they were ever to be scaled this way
+                scale_key = key + ".scale_absmax"  # More descriptive fallback
+
+            if scale_key != key:  # Ensure it's a different key
+                quantized_state_dict[scale_key] = scale_factor_for_comfyui_to_save
+            else:
                 print(
-                    f"  Owlscale dequant factor for {key}: {dequant_scale_factor_for_owlscale.item():.5g}"
+                    f"Warning: Could not determine unique scale key for {key} (generated scale key was the same: {scale_key}). Scale not saved separately for ComfyUI-style scaled FP8."
                 )
 
-            # --- Plotting Logic ---
-            if (
-                args.plot
-                and original_tensor_for_plot_and_type is not None
-                and plots_generated_count < args.plot_max_tensors
-            ):
-                print(f"  Generating plot for {key}...")
-                dequantized_for_plot = None
-                if (
-                    tensor_actually_scaled
-                    and dequant_scale_factor_for_owlscale is not None
-                ):  # Use scale factor if tensor was actually scaled
-                    # Dequantize using the scale factor
-                    # Ensure scale factor is on the same device and correct dtype for multiplication
-                    scale_for_dequant = dequant_scale_factor_for_owlscale.to(
-                        tensor_to_process.device
-                    ).to(tensor_to_process.dtype)
-                    dequantized_for_plot = (
-                        quantized_tensor.to(tensor_to_process.dtype) * scale_for_dequant
-                    ).cpu()
-                else:
-                    # For non-scaled, or if scale factor is not available (e.g. bias with owlscale flag on)
-                    # cast quantized back to original dtype for comparison
-                    dequantized_for_plot = quantized_tensor.to(
-                        original_tensor_for_plot_and_type.dtype
-                    ).cpu()
+            quantized_count += 1
+            print(f" Done. New dtype: {quantized_tensor.dtype}")
+            if scale_factor_for_comfyui_to_save is not None:
+                print(
+                    f"  ComfyUI-style scale factor for {key} (saved as {scale_key}): {scale_factor_for_comfyui_to_save.item():.5g}"
+                )
 
+        elif (  # Original (non-owlscale) quantization path, also excluding bias from direct quantization if no scaling applied
+            any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
+            and (not key.endswith(".bias"))
+            and tensor_to_process.is_floating_point()
+        ):
+            print(" -> Quantizing (direct, no ComfyUI-style scaling)...", end="")
+            quantized_tensor = stochastic_round_tensor_to_fp8(
+                tensor_to_process,  # Original tensor values passed directly
+                fp8_dtype,
+                args.complex_rounding,
+                args.shifturb,
+                args.owlshift,
+                seed=main_seed + i,
+                debug_mode=args.debug,  # Pass debug flag
+            )
+            quantized_state_dict[key] = quantized_tensor.to(original_tensor_device)
+            quantized_count += 1
+            print(f" Done. New dtype: {quantized_tensor.dtype}")
+
+        else:  # Not a target key, or a bias (if not doing ComfyUI scaling for it), or not a float
+            print(
+                " -> Skipping quantization (not a target key/suffix, or a bias, or not a float)."
+            )
+            quantized_state_dict[key] = tensor_to_process.to(
+                original_tensor_device
+            )  # Copy as is, ensuring it's on original device
+
+        # --- Plotting Logic (Adjusted for ComfyUI-style scaling if used) ---
+        if (
+            args.plot
+            and original_tensor_for_plot_and_type is not None
+            and plots_generated_count < args.plot_max_tensors
+            # Ensure we plot only if quantization actually happened on this tensor or if it's a float we tried to process
+            and (
+                key in quantized_state_dict
+                and quantized_state_dict[key].dtype == fp8_dtype
+            )
+        ):
+            print(f"  Generating plot for {key}...")
+            quantized_tensor_for_plot = quantized_state_dict[
+                key
+            ].cpu()  # FP8 tensor on CPU
+            dequantized_for_plot = None
+
+            if (
+                args.owlscale
+                and scale_factor_for_comfyui_to_save is not None
+                and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
+                and tensor_to_process.is_floating_point()
+                and not key.endswith(".bias")
+            ):
+                # Dequantize using the ComfyUI-style scale factor
+                scale_for_dequant = scale_factor_for_comfyui_to_save.cpu().to(
+                    original_tensor_for_plot_and_type.dtype
+                )
+                dequantized_for_plot = (
+                    quantized_tensor_for_plot.to(
+                        original_tensor_for_plot_and_type.dtype
+                    )
+                    * scale_for_dequant
+                )
+            elif (
+                not args.owlscale
+                and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
+                and tensor_to_process.is_floating_point()
+                and not key.endswith(".bias")
+            ):
+                # For non-scaled, just cast quantized FP8 back to original dtype for comparison
+                dequantized_for_plot = quantized_tensor_for_plot.to(
+                    original_tensor_for_plot_and_type.dtype
+                )
+
+            if dequantized_for_plot is not None:
                 plot_filename = os.path.join(
                     args.plot_dir, f"{key.replace('.', '_')}_{fp8_dtype}.png"
                 )
                 generate_comparison_plots(
                     original_tensor_for_plot_and_type,
-                    quantized_tensor.cpu(),  # Send CPU copy of FP8 tensor
+                    quantized_tensor_for_plot,  # Send CPU copy of FP8 tensor
                     dequantized_for_plot,
                     key,
                     plot_filename,
@@ -961,20 +1035,21 @@ def main():
                     args.plot_sample_size,
                 )
                 plots_generated_count += 1
-            # --- End Plotting Logic ---
-
-        else:
-            print(" -> Skipping quantization (not a target key/suffix or not a float).")
-            quantized_state_dict[key] = tensor_to_process.to(
-                original_tensor_device
-            )  # Copy as is, ensuring it's on original device
+            else:
+                if args.debug:
+                    print(
+                        f"  DEBUG: Skipping plot for {key} as dequantized tensor could not be prepared (check conditions)."
+                    )
+        # --- End Plotting Logic ---
 
     print(
         f"Quantization complete. {quantized_count}/{total_tensors} tensors were processed for quantization."
     )
 
-    if args.owlscale:  # Add marker only if owlscale was used
-        print("Adding FP8 marker key 'scaled_fp8' for compatibility.")
+    if (
+        args.owlscale
+    ):  # Add marker only if ComfyUI-style scaling was attempted for some weights
+        print("Adding FP8 marker key 'scaled_fp8' for ComfyUI compatibility.")
         # We use the fp8_dtype determined from args.fp8_type for the marker
         quantized_state_dict["scaled_fp8"] = torch.empty((2), dtype=fp8_dtype)
 
