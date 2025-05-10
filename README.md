@@ -39,7 +39,11 @@ The script supports multiple FP8 formats and several distinct stochastic roundin
     * For a given input value $v$:
       1. The sign, exponent ($e$), and mantissa ($m$) are extracted.
       2. The mantissa is scaled based on the target FP8 format's mantissa bits (MANTISSA_BITS). For normal numbers:
-        $$ m_{\mathrm{scaled}} = \left( \frac{|v|}{2^{e - \mathrm{EXPONENT\_BIAS}}} - 1.0 \right) \times 2^{\mathrm{MANTISSA\_BITS}} $$
+
+        ```math
+        m_{\mathrm{scaled}} = \left( \frac{|v|}{2^{e - \mathrm{EXPONENT\_BIAS}}} - 1.0 \right) \times 2^{\mathrm{MANTISSA\_BITS}}
+        ```
+
         A similar calculation is done for subnormal numbers.
       3. A uniform random number $u \sim U[0,1)$ is added to $m_{\mathrm{scaled}}$: $m_{\mathrm{stoch}} = \lfloor m_{\mathrm{scaled}} + u \rfloor$.
       4. The stochastically rounded mantissa $m_{\mathrm{final}} = m_{\mathrm{stoch}} / 2^{\mathrm{MANTISSA\_BITS}}$ is used to reconstruct the number.
