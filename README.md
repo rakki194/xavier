@@ -10,40 +10,40 @@ The script supports multiple FP8 formats and several distinct stochastic roundin
 * **Stochastic Rounding**: Employs different methods to probabilistically round values, aiming to maintain model fidelity better than deterministic rounding.
 * **Multiple Rounding Techniques**:
   * **Default Stochastic Rounding**:
-    * This method first determines two FP8-representable candidates, \(x_L\) (low) and \(x_H\) (high), that are likely to bracket the input value \(v\).
-    * One candidate is obtained by PyTorch's default Round-to-Nearest-Even (RNE) cast of \(v\) to the target FP8 type, let's call this \(v_{RNE}\).
-    * The other candidate is its FP8 neighbor, \(v_{neighbor}\), found in the direction of \(v\) relative to \(v_{RNE}\). This neighbor search is an approximation.
-    * So, \(x_L = \min(v_{RNE}, v_{neighbor})\) and \(x_H = \max(v_{RNE}, v_{neighbor})\).
-    * The probability of rounding to the higher candidate \(x_H\) is proportional to the input value's position between these two candidates:
-      \[ P(\text{round to } x_H) = \frac{v - x_L}{x_H - x_L} \]
-    * If \(x_H = x_L\) (e.g., \(v\) is exactly representable or at the boundary of the FP8 range), the probability is clamped to ensure deterministic rounding to that value. A random number \(u \sim U[0,1]\) is drawn; if \(u < P(\text{round to } x_H)\), \(v\) is rounded to \(x_H\), otherwise to \(x_L\).
+    * This method first determines two FP8-representable candidates, $x_L$ (low) and $x_H$ (high), that are likely to bracket the input value $v$.
+    * One candidate is obtained by PyTorch's default Round-to-Nearest-Even (RNE) cast of $v$ to the target FP8 type, let's call this $v_{RNE}$.
+    * The other candidate is its FP8 neighbor, $v_{neighbor}$, found in the direction of $v$ relative to $v_{RNE}$. This neighbor search is an approximation.
+    * So, $x_L = \min(v_{RNE}, v_{neighbor})$ and $x_H = \max(v_{RNE}, v_{neighbor})$.
+    * The probability of rounding to the higher candidate $x_H$ is proportional to the input value's position between these two candidates:
+      $$ P(\text{round to } x_H) = \frac{v - x_L}{x_H - x_L} $$
+    * If $x_H = x_L$ (e.g., $v$ is exactly representable or at the boundary of the FP8 range), the probability is clamped to ensure deterministic rounding to that value. A random number $u \sim U[0,1]$ is drawn; if $u < P(\text{round to } x_H)$, $v$ is rounded to $x_H$, otherwise to $x_L$.
   * **Complex Neighbor Stochastic Rounding** (`--complex_rounding`):
-    * This method uses a more sophisticated approach (`get_fp8_bracketing_candidates_complex`) to find two FP8-representable values, \(x_L\) and \(x_H\), that strictly bracket the input tensor values \(v\).
-    * It considers three cases for each element in \(v\):
-      1. If \(v > v_{RNE}\): \(x_L = v_{RNE}\), and \(x_H\) is the next FP8 value greater than \(v_{RNE}\).
-      2. If \(v < v_{RNE}\): \(x_H = v_{RNE}\), and \(x_L\) is the next FP8 value smaller than \(v_{RNE}\).
-      3. If \(v = v_{RNE}\): \(x_L = v_{RNE}\), and \(x_H\) is the next FP8 value greater than \(v_{RNE}\) (by convention).
+    * This method uses a more sophisticated approach (`get_fp8_bracketing_candidates_complex`) to find two FP8-representable values, $x_L$ and $x_H$, that strictly bracket the input tensor values $v$.
+    * It considers three cases for each element in $v$:
+      1. If $v > v_{RNE}$: $x_L = v_{RNE}$, and $x_H$ is the next FP8 value greater than $v_{RNE}$.
+      2. If $v < v_{RNE}$: $x_H = v_{RNE}$, and $x_L$ is the next FP8 value smaller than $v_{RNE}$.
+      3. If $v = v_{RNE}$: $x_L = v_{RNE}$, and $x_H$ is the next FP8 value greater than $v_{RNE}$ (by convention).
     * The `torch.nextafter` function is used (approximated on the FP8 grid by casting back and forth from the original precision) to find these neighbors.
-    * The probabilistic choice between \(x_L\) and \(x_H\) is the same as the default method:
-      \[ P(\text{round to } x_H) = \frac{v - x_L}{x_H - x_L} \]
+    * The probabilistic choice between $x_L$ and $x_H$ is the same as the default method:
+      $$ P(\text{round to } x_H) = \frac{v - x_L}{x_H - x_L} $$
   * **Shift-and-Perturb (Shifturb)** (`--shifturb`):
     * This method implements stochastic rounding by adding carefully scaled uniform random noise to the input tensor *before* quantizing it with standard Round-to-Nearest-Even (RNE).
     * **Shift Implementation**:
-      1. First, it determines the bracketing FP8 candidates \(x_L\) and \(x_H\) for the input value \(v\) (typically using the `get_fp8_bracketing_candidates_complex` method for a good local estimate).
-      2. The difference \(\Delta = x_H - x_L\) approximates the quantization step size around \(v\).
-      3. Uniform random noise \(n\) is generated from the distribution \(U[-\Delta/2, +\Delta/2]\).
-      4. The perturbed input is \(v' = v + n\).
-      5. The final FP8 value is obtained by applying RNE to the perturbed value: \(v_{FP8} = \text{RNE}(v')\).
+      1. First, it determines the bracketing FP8 candidates $x_L$ and $x_H$ for the input value $v$ (typically using the `get_fp8_bracketing_candidates_complex` method for a good local estimate).
+      2. The difference $\Delta = x_H - x_L$ approximates the quantization step size around $v$.
+      3. Uniform random noise $n$ is generated from the distribution $U[-\Delta/2, +\Delta/2]$.
+      4. The perturbed input is $v' = v + n$.
+      5. The final FP8 value is obtained by applying RNE to the perturbed value: $v_{FP8} = \text{RNE}(v')$.
     * The idea is that adding noise centered at zero with a range equal to the quantization step effectively randomizes which side of the rounding boundary the value falls on, simulating stochastic rounding.
   * **Owlshift** (`--owlshift`):
     * This method directly implements stochastic rounding by manipulating the mantissa bits of the floating-point numbers. It typically operates on an intermediate `.half()` (FP16) representation of the input.
-    * For a given input value \(v\):
-      1. The sign, exponent (\(e\)), and mantissa (\(m\)) are extracted.
+    * For a given input value $v$:
+      1. The sign, exponent ($e$), and mantissa ($m$) are extracted.
       2. The mantissa is scaled based on the target FP8 format's mantissa bits (MANTISSA_BITS). For normal numbers:
         \[ m_{scaled} = \left( \frac{|v|}{2^{e - \text{EXPONENT_BIAS}}} - 1.0 \right) \times 2^{\text{MANTISSA_BITS}} \]
         A similar calculation is done for subnormal numbers.
-      3. A uniform random number \(u \sim U[0,1)\) is added to \(m_{scaled}\): \(m_{stoch} = \lfloor m_{scaled} + u \rfloor\).
-      4. The stochastically rounded mantissa \(m_{final} = m_{stoch} / 2^{\text{MANTISSA_BITS}}\) is used to reconstruct the number.
+      3. A uniform random number $u \sim U[0,1)$ is added to $m_{scaled}$: $m_{stoch} = \lfloor m_{scaled} + u \rfloor$.
+      4. The stochastically rounded mantissa $m_{final} = m_{stoch} / 2^{\text{MANTISSA_BITS}}$ is used to reconstruct the number.
       5. The number is then reconstructed from the sign, original exponent, and the new stochastically rounded mantissa, and finally cast to the target FP8 type.
     * This method includes logic for handling normal and subnormal numbers, and tensor slicing for large tensors to manage memory/computation. It uses a dedicated random number generator seeded by the `--seed` argument.
 * **Per-Tensor Max-Absolute Scaling (Owlscale)** (`--owlscale`):
