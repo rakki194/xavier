@@ -1,4 +1,4 @@
-# Xavier FP8 Quantization Script
+# Xavier FP8 Quantization 🧠
 
 `xavier.py` is a Python script designed to quantize `.safetensors` model files to FP8 (8-bit floating-point) precision using various stochastic rounding techniques. Stochastic rounding, as opposed to deterministic methods like Round-to-Nearest-Even (RNE), introduces a controlled amount of noise during quantization. This can help preserve model performance by ensuring that rounding errors do not systematically bias values.
 
@@ -40,9 +40,9 @@ The script supports multiple FP8 formats and several distinct stochastic roundin
       1. The sign, exponent ($e$), and mantissa ($m$) are extracted.
       2. The mantissa is scaled based on the target FP8 format's mantissa bits (MANTISSA_BITS). For normal numbers, this involves taking the absolute value of the input `v`, dividing it by 2 raised to the power of (the exponent `e` minus the `EXPONENT_BIAS`), subtracting 1.0 (to isolate the fractional part of the mantissa), and then multiplying by 2 raised to the power of `MANTISSA_BITS` (the number of mantissa bits in the target FP8 format). This effectively scales the mantissa to an integer range suitable for stochastic addition.
         A similar calculation is done for subnormal numbers.
-      1. A uniform random number $u \sim U[0,1)$ is added to $m_{\mathrm{scaled}}$: $m_{\mathrm{stoch}} = \lfloor m_{\mathrm{scaled}} + u \rfloor$.
-      2. The stochastically rounded integer mantissa, `m_stoch`, is then scaled back to its fractional form by dividing it by 2 raised to the power of `MANTISSA_BITS`. This `m_final` is then used to reconstruct the number.
-      3. The number is then reconstructed from the sign, original exponent, and the new stochastically rounded mantissa, and finally cast to the target FP8 type.
+         1. A uniform random number $u \sim U[0,1)$ is added to $m_{\mathrm{scaled}}$: $m_{\mathrm{stoch}} = \lfloor m_{\mathrm{scaled}} + u \rfloor$.
+         2. The stochastically rounded integer mantissa, `m_stoch`, is then scaled back to its fractional form by dividing it by 2 raised to the power of `MANTISSA_BITS`. This `m_final` is then used to reconstruct the number.
+         3. The number is then reconstructed from the sign, original exponent, and the new stochastically rounded mantissa, and finally cast to the target FP8 type.
     * This method includes logic for handling normal and subnormal numbers, and tensor slicing for large tensors to manage memory/computation. It uses a dedicated random number generator seeded by the `--seed` argument.
 
 * **Per-Tensor Max-Absolute Scaling (Owlscale)** (`--owlscale`):
