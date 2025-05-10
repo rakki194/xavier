@@ -24,8 +24,7 @@ The script supports multiple FP8 formats and several distinct stochastic roundin
       2. If $v < v_{RNE}$: $x_H = v_{RNE}$, and $x_L$ is the next FP8 value smaller than $v_{RNE}$.
       3. If $v = v_{RNE}$: $x_L = v_{RNE}$, and $x_H$ is the next FP8 value greater than $v_{RNE}$ (by convention).
     * The `torch.nextafter` function is used (approximated on the FP8 grid by casting back and forth from the original precision) to find these neighbors.
-    * The probabilistic choice between $x_L$ and $x_H$ is the same as the default method:
-      $$ P(\text{round to } x_H) = \frac{v - x_L}{x_H - x_L} $$
+    * The probabilistic choice between $x_L$ and $x_H$ is the same as the default method: $P(\text{round to } x_H) = \frac{v - x_L}{x_H - x_L}$
   * **Shift-and-Perturb (Shifturb)** (`--shifturb`):
     * This method implements stochastic rounding by adding carefully scaled uniform random noise to the input tensor *before* quantizing it with standard Round-to-Nearest-Even (RNE).
     * **Shift Implementation**:
@@ -40,7 +39,7 @@ The script supports multiple FP8 formats and several distinct stochastic roundin
     * For a given input value $v$:
       1. The sign, exponent ($e$), and mantissa ($m$) are extracted.
       2. The mantissa is scaled based on the target FP8 format's mantissa bits (MANTISSA_BITS). For normal numbers:
-        \[ m_{scaled} = \left( \frac{|v|}{2^{e - \text{EXPONENT_BIAS}}} - 1.0 \right) \times 2^{\text{MANTISSA_BITS}} \]
+        $$ m_{scaled} = \left( \frac{|v|}{2^{e - \text{EXPONENT_BIAS}}} - 1.0 \right) \times 2^{\text{MANTISSA_BITS}} $$
         A similar calculation is done for subnormal numbers.
       3. A uniform random number $u \sim U[0,1)$ is added to $m_{scaled}$: $m_{stoch} = \lfloor m_{scaled} + u \rfloor$.
       4. The stochastically rounded mantissa $m_{final} = m_{stoch} / 2^{\text{MANTISSA_BITS}}$ is used to reconstruct the number.
