@@ -709,60 +709,86 @@ def main():
                 args.owlscale
                 and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
                 and tensor_to_process.is_floating_point()
-                and (not key.endswith(".bias"))
+                and (
+                    not key.endswith(".bias")
+                )  # Exclude bias from ComfyUI-style owlscale path
             ):
                 print(" (Applying ComfyUI-style scaled FP8 quantization)...", end="")
+
+                # 1. Determine scale_factor_for_comfyui
                 original_hp_tensor = tensor_to_process.to(OWLSCALE_COMPUTE_DTYPE)
                 abs_max = torch.max(torch.abs(original_hp_tensor))
+
                 scale_factor_for_comfyui_val = abs_max.clamp(min=1e-12)
+
                 scale_factor_for_comfyui_to_save = scale_factor_for_comfyui_val.to(
                     OWLSCALE_SCALE_DTYPE
-                ).to(
-                    original_tensor_device
-                )  # Save scale on CPU
+                ).to(original_tensor_device)
 
-                tensor_for_quant = (
-                    original_hp_tensor / scale_factor_for_comfyui_val
-                ).to(
-                    tensor_to_process.dtype
-                )  # back to original dtype for rounder
-
-                # Stochastic rounding (owlshift for ComfyUI compatibility)
-                quantized_tensor_fp8 = stochastic_round_tensor_to_fp8(
-                    tensor=tensor_for_quant,
-                    fp8_dtype=fp8_dtype,
-                    use_complex_method=False,  # ComfyUI scaled_fp8 uses simpler stochastic rounding
-                    use_shift_perturb_method=False,
-                    use_owlshift_method=True,  # Explicitly use owlshift for this path
-                    seed=main_seed
-                    + i,  # Vary seed per tensor for owlshift consistency with some practices
-                    debug_mode=args.debug,
+                # 2. Prepare tensor for quantization: original_tensor / scale
+                input_for_quantization_hp = (
+                    tensor_to_process.to(scale_factor_for_comfyui_val.dtype)
+                    / scale_factor_for_comfyui_val
                 )
-                quantized_state_dict[key] = quantized_tensor_fp8.to(
-                    original_tensor_device
-                )  # Store on CPU
-                # Store the scale factor with a conventional key for ComfyUI
-                # Example: model.0.weight -> model.0.scale_weight or similar. Needs specific key naming.
-                # This script focuses on tensor quantization, ComfyUI keying is separate.
-                # We'll just print it for now.
-                if scale_factor_for_comfyui_to_save is not None:
-                    if key.endswith(".weight"):
-                        scale_key = key.replace(".weight", ".scale_weight")
-                        # ComfyUI expects scale_weight to be float32.
-                        # scale_factor_for_comfyui_to_save is currently float64 on CPU.
-                        scale_to_save = scale_factor_for_comfyui_to_save.to(
-                            torch.float32
-                        )
-                        quantized_state_dict[scale_key] = scale_to_save
+                input_for_quantization = input_for_quantization_hp.to(
+                    tensor_to_process.dtype
+                )
+
+                if args.debug:
+                    if input_for_quantization.numel() > 0:
                         print(
-                            f" (Scale: {scale_to_save.item():.4g}, Saved as: {scale_key})",
-                            end="",
+                            f"  Tensor {key} input_for_quantization (orig / scale): min={input_for_quantization.min().item():.4g}, max={input_for_quantization.max().item():.4g}, mean={input_for_quantization.mean().item():.4g}, isfinite={torch.isfinite(input_for_quantization).all().item()}, dtype={input_for_quantization.dtype}"
                         )
                     else:
                         print(
-                            f" (Scale: {scale_factor_for_comfyui_to_save.item():.4g}, Not saved for key {key} as it doesn't end with .weight)",
-                            end="",
+                            f"  Tensor {key} input_for_quantization (orig / scale) is empty."
                         )
+
+                # 3. Quantize the scaled tensor
+                quantized_tensor = stochastic_round_tensor_to_fp8(
+                    input_for_quantization,
+                    fp8_dtype,
+                    args.complex_rounding,
+                    args.shifturb,
+                    args.owlshift,
+                    seed=main_seed + i,
+                    debug_mode=args.debug,
+                )
+
+                # 4. Save quantized tensor and the scale factor
+                quantized_state_dict[key] = quantized_tensor.to(original_tensor_device)
+
+                _scale_key_to_use_ = ""  # Renamed from scale_key in user code to avoid conflict if used later
+                scale_key_parts = key.split(".")
+                if scale_key_parts[-1] == "weight":
+                    scale_key_parts[-1] = "scale_weight"
+                    _scale_key_to_use_ = ".".join(scale_key_parts)
+                else:
+                    _scale_key_to_use_ = key + ".scale_absmax"
+
+                if _scale_key_to_use_ != key:
+                    quantized_state_dict[_scale_key_to_use_] = (
+                        scale_factor_for_comfyui_to_save
+                    )
+                else:
+                    # This print should be conditional on args.debug or be a warning
+                    print(
+                        f" Warning: Could not determine unique scale key for {key} (generated scale key was the same: {_scale_key_to_use_}). Scale not saved separately."
+                    )
+
+                quantized_count += 1
+                # The following print statements replace the general " Done." that was previously outside this if/elif/else block
+                print(
+                    f" Done. New dtype: {quantized_tensor.dtype}", end=""
+                )  # Keep end="" to allow scale factor print on same conceptual line
+                if scale_factor_for_comfyui_to_save is not None:
+                    print(
+                        f" Scale factor for {key} (as {_scale_key_to_use_}): {scale_factor_for_comfyui_to_save.item():.5g}",
+                        end="",
+                    )
+                # The final newline will be handled by the outer loop's print(" Done.") structure if that's kept,
+                # or this line needs its own implicit newline if the outer " Done." is removed.
+                # For now, ending this block's specific prints.
 
             elif (
                 any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
