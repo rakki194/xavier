@@ -865,9 +865,23 @@ def main():
             if main_device.type == "cuda":
                 torch.cuda.empty_cache()
 
-        print("Saving FP8 quantized model...")
+        print(
+            f"Quantization complete. {quantized_count}/{total_tensors} tensors were processed for quantization."
+        )
+
+    if (
+        args.owlscale
+    ):  # Add marker only if ComfyUI-style scaling was attempted for some weights
+        print("Adding FP8 marker key 'scaled_fp8' for ComfyUI compatibility.")
+        # We use the fp8_dtype determined from args.fp8_type for the marker
+        quantized_state_dict["scaled_fp8"] = torch.empty((2), dtype=fp8_dtype)
+
+    try:
+        print(f"Saving quantized model to: {args.output_file}")
         save_file(quantized_state_dict, args.output_file)
         print(f"FP8 Quantized model saved to: {args.output_file}")
+    except Exception as e:
+        print(f"Error saving quantized model: {e}")
 
 
 if __name__ == "__main__":
