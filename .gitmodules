@@ -1,0 +1,12 @@
+[submodule "third_party/deepcompressor"]
+	path = third_party/deepcompressor
+	url = https://github.com/mit-han-lab/deepcompressor
+[submodule "third_party/nunchaku"]
+	path = third_party/nunchaku
+	url = https://github.com/mit-han-lab/nunchaku
+[submodule "third_party/flow"]
+	path = third_party/flow
+	url = https://github.com/lodestone-rock/flow
+[submodule "third_party/ComfyUI_FluxMod"]
+	path = third_party/ComfyUI_FluxMod
+	url = https://github.com/lodestone-rock/ComfyUI_FluxMod
