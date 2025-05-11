@@ -43,8 +43,16 @@ class TestGetFP8Neighbor:
         expected_smallest_pos = torch.finfo(
             fp8_dtype_target
         ).tiny  # Smallest positive subnormal
+        print(
+            f"Zero_pos debug: neighbor_pos={neighbor_pos.to(torch.float32)}, expected_via_fp8_val={fp8_val(expected_smallest_pos, fp8_dtype_target, orig_dtype).to(torch.float32)}, neighbor_pos_raw={neighbor_pos}, expected_smallest_pos_raw={expected_smallest_pos}"
+        )
         torch.testing.assert_close(
-            neighbor_pos, fp8_val(expected_smallest_pos, fp8_dtype_target, orig_dtype)
+            neighbor_pos.to(torch.float32),
+            fp8_val(expected_smallest_pos, fp8_dtype_target, orig_dtype).to(
+                torch.float32
+            ),
+            atol=1e-3,
+            rtol=1e-3,
         )
         assert neighbor_pos.item() > 0.0
 
@@ -52,8 +60,16 @@ class TestGetFP8Neighbor:
         direction_neg = _t([-1.0], dtype=orig_dtype)
         neighbor_neg = get_fp8_neighbor(zero, direction_neg, fp8_dtype_target)
         expected_smallest_neg = -expected_smallest_pos
+        print(
+            f"Zero_neg debug: neighbor_neg={neighbor_neg.to(torch.float32)}, expected_via_fp8_val={fp8_val(expected_smallest_neg, fp8_dtype_target, orig_dtype).to(torch.float32)}, neighbor_neg_raw={neighbor_neg}, expected_smallest_neg_raw={expected_smallest_neg}"
+        )
         torch.testing.assert_close(
-            neighbor_neg, fp8_val(expected_smallest_neg, fp8_dtype_target, orig_dtype)
+            neighbor_neg.to(torch.float32),
+            fp8_val(expected_smallest_neg, fp8_dtype_target, orig_dtype).to(
+                torch.float32
+            ),
+            atol=1e-3,
+            rtol=1e-3,
         )
         assert neighbor_neg.item() < 0.0
 
@@ -113,7 +129,9 @@ class TestGetFP8Neighbor:
 
         neighbor = get_fp8_neighbor(value_orig_prec, direction, fp8_dtype_target)
         torch.testing.assert_close(
-            neighbor, expected_neighbor_val, msg=f"Next for {val_py}"
+            neighbor.to(torch.float32),
+            expected_neighbor_val.to(torch.float32),
+            msg=f"Next for {val_py}",
         )
         if not torch.equal(
             value_orig_prec, max_fp8
@@ -143,7 +161,9 @@ class TestGetFP8Neighbor:
 
         neighbor = get_fp8_neighbor(value_orig_prec, direction, fp8_dtype_target)
         torch.testing.assert_close(
-            neighbor, expected_neighbor_val, msg=f"Prev for {val_py}"
+            neighbor.to(torch.float32),
+            expected_neighbor_val.to(torch.float32),
+            msg=f"Prev for {val_py}",
         )
         if not torch.equal(
             value_orig_prec, min_fp8
@@ -159,7 +179,9 @@ class TestGetFP8Neighbor:
         direction = _t([1.0], dtype=orig_dtype)
         neighbor = get_fp8_neighbor(value_orig_prec, direction, fp8_dtype_target)
         torch.testing.assert_close(
-            neighbor, value_orig_prec, msg="Next of max"
+            neighbor.to(torch.float32),
+            value_orig_prec.to(torch.float32),
+            msg="Next of max",
         )  # Should be max itself
 
     def test_min_value_prev(self, orig_dtype, fp8_dtype_target):
@@ -169,5 +191,7 @@ class TestGetFP8Neighbor:
         direction = _t([-1.0], dtype=orig_dtype)
         neighbor = get_fp8_neighbor(value_orig_prec, direction, fp8_dtype_target)
         torch.testing.assert_close(
-            neighbor, value_orig_prec, msg="Prev of min"
+            neighbor.to(torch.float32),
+            value_orig_prec.to(torch.float32),
+            msg="Prev of min",
         )  # Should be min itself

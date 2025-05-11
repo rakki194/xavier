@@ -29,9 +29,7 @@ def get_fp8_bracketing_candidates_complex(
     # Case 1: tensor > x_cast_orig_prec
     # x_cast_orig_prec is the lower bound. Find next FP8 value up.
     if torch.any(mask_tensor_gt_cast):
-        current_low_fp8_native_subset = x_cast_fp8_native[mask_tensor_gt_cast]
-        # Operate nextafter in original_dtype after initial snap to fp8 grid
-        current_low_orig_prec_subset = current_low_fp8_native_subset.to(original_dtype)
+        current_low_orig_prec_subset = x_cast_orig_prec[mask_tensor_gt_cast]
 
         next_high_orig_prec_subset = torch.nextafter(
             current_low_orig_prec_subset,
@@ -52,11 +50,7 @@ def get_fp8_bracketing_candidates_complex(
     # Case 2: tensor < x_cast_orig_prec
     # x_cast_orig_prec is the upper bound. Find next FP8 value down.
     if torch.any(mask_tensor_lt_cast):
-        current_high_fp8_native_subset = x_cast_fp8_native[mask_tensor_lt_cast]
-        # Operate nextafter in original_dtype
-        current_high_orig_prec_subset = current_high_fp8_native_subset.to(
-            original_dtype
-        )
+        current_high_orig_prec_subset = x_cast_orig_prec[mask_tensor_lt_cast]
 
         next_low_orig_prec_subset = torch.nextafter(
             current_high_orig_prec_subset,
@@ -78,9 +72,7 @@ def get_fp8_bracketing_candidates_complex(
     # x_cast_orig_prec is one bound. Find its next FP8 neighbor for the other bound.
     # By convention, let x_cast_orig_prec be low_candidate and find the next higher FP8 value.
     if torch.any(mask_tensor_eq_cast):
-        exact_match_fp8_native_subset = x_cast_fp8_native[mask_tensor_eq_cast]
-        # Operate nextafter in original_dtype
-        exact_match_orig_prec_subset = exact_match_fp8_native_subset.to(original_dtype)
+        exact_match_orig_prec_subset = x_cast_orig_prec[mask_tensor_eq_cast]
 
         next_high_orig_prec_subset = torch.nextafter(
             exact_match_orig_prec_subset,

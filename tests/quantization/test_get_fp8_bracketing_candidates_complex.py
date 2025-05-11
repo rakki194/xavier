@@ -50,12 +50,16 @@ class TestGetFP8BracketingCandidatesComplex:
         assert high_cand.shape == tensor.shape
         # Check if candidates are FP8 representable (by seeing if converting them changes their value)
         torch.testing.assert_close(
-            low_cand, low_cand.to(fp8_dtype_target).to(orig_dtype)
+            low_cand.to(torch.float32),
+            low_cand.to(fp8_dtype_target).to(orig_dtype).to(torch.float32),
         )
         torch.testing.assert_close(
-            high_cand, high_cand.to(fp8_dtype_target).to(orig_dtype)
+            high_cand.to(torch.float32),
+            high_cand.to(fp8_dtype_target).to(orig_dtype).to(torch.float32),
         )
-        assert torch.all(low_cand <= high_cand)  # low should always be <= high
+        assert torch.all(
+            low_cand.to(torch.float32) <= high_cand.to(torch.float32)
+        )  # low should always be <= high
 
     def test_case1_tensor_gt_cast(self, orig_dtype, fp8_dtype_target):
         """Test case where tensor > x_cast_orig_prec."""
@@ -68,7 +72,7 @@ class TestGetFP8BracketingCandidatesComplex:
         # If tensor was 0.95, RNE for E4M3 is 1.0. So 0.95 < 1.0 (Case 2).
         # We need to pick tensor such that it is indeed > x_cast
         x_cast_check = tensor.to(fp8_dtype_target).to(orig_dtype)
-        if not torch.all(tensor > x_cast_check):
+        if not torch.all(tensor.to(torch.float32) > x_cast_check.to(torch.float32)):
             pytest.skip(
                 f"Test condition tensor > x_cast not met for {tensor.item()} with {fp8_dtype_target} (x_cast={x_cast_check.item()})"
             )
@@ -82,8 +86,12 @@ class TestGetFP8BracketingCandidatesComplex:
             tensor, fp8_dtype_target
         )
 
-        torch.testing.assert_close(low_cand, expected_low_cand)
-        torch.testing.assert_close(high_cand, expected_high_cand)
+        torch.testing.assert_close(
+            low_cand.to(torch.float32), expected_low_cand.to(torch.float32)
+        )
+        torch.testing.assert_close(
+            high_cand.to(torch.float32), expected_high_cand.to(torch.float32)
+        )
 
     def test_case2_tensor_lt_cast(self, orig_dtype, fp8_dtype_target):
         """Test case where tensor < x_cast_orig_prec."""
@@ -91,7 +99,7 @@ class TestGetFP8BracketingCandidatesComplex:
         # high_candidate should be 1.0. low_candidate should be prev_fp8(1.0) = 0.875.
         tensor = torch.tensor([0.95], dtype=orig_dtype)
         x_cast_check = tensor.to(fp8_dtype_target).to(orig_dtype)
-        if not torch.all(tensor < x_cast_check):
+        if not torch.all(tensor.to(torch.float32) < x_cast_check.to(torch.float32)):
             pytest.skip(
                 f"Test condition tensor < x_cast not met for {tensor.item()} with {fp8_dtype_target} (x_cast={x_cast_check.item()})"
             )
@@ -105,8 +113,12 @@ class TestGetFP8BracketingCandidatesComplex:
             tensor, fp8_dtype_target
         )
 
-        torch.testing.assert_close(low_cand, expected_low_cand)
-        torch.testing.assert_close(high_cand, expected_high_cand)
+        torch.testing.assert_close(
+            low_cand.to(torch.float32), expected_low_cand.to(torch.float32)
+        )
+        torch.testing.assert_close(
+            high_cand.to(torch.float32), expected_high_cand.to(torch.float32)
+        )
 
     def test_case3_tensor_eq_cast(self, orig_dtype, fp8_dtype_target):
         """Test case where tensor == x_cast_orig_prec (tensor is an FP8 value)."""
@@ -117,7 +129,7 @@ class TestGetFP8BracketingCandidatesComplex:
         )  # Ensure it's an exact FP8 value
         x_cast_check = tensor.to(fp8_dtype_target).to(orig_dtype)
         assert torch.all(
-            tensor == x_cast_check
+            tensor.to(torch.float32) == x_cast_check.to(torch.float32)
         ), "Test setup: tensor should be exact FP8"
 
         expected_low_cand = tensor
@@ -134,8 +146,12 @@ class TestGetFP8BracketingCandidatesComplex:
             tensor, fp8_dtype_target
         )
 
-        torch.testing.assert_close(low_cand, expected_low_cand)
-        torch.testing.assert_close(high_cand, expected_high_cand)
+        torch.testing.assert_close(
+            low_cand.to(torch.float32), expected_low_cand.to(torch.float32)
+        )
+        torch.testing.assert_close(
+            high_cand.to(torch.float32), expected_high_cand.to(torch.float32)
+        )
 
     def test_max_value(self, orig_dtype, fp8_dtype_target):
         """Test with tensor being the max FP8 value."""
@@ -148,9 +164,15 @@ class TestGetFP8BracketingCandidatesComplex:
         low_cand, high_cand = get_fp8_bracketing_candidates_complex(
             tensor, fp8_dtype_target
         )
-        torch.testing.assert_close(low_cand, expected_low_cand, msg="Max val: Low cand")
         torch.testing.assert_close(
-            high_cand, expected_high_cand, msg="Max val: High cand"
+            low_cand.to(torch.float32),
+            expected_low_cand.to(torch.float32),
+            msg="Max val: Low cand",
+        )
+        torch.testing.assert_close(
+            high_cand.to(torch.float32),
+            expected_high_cand.to(torch.float32),
+            msg="Max val: High cand",
         )
 
     def test_min_value(self, orig_dtype, fp8_dtype_target):
@@ -166,9 +188,15 @@ class TestGetFP8BracketingCandidatesComplex:
         low_cand, high_cand = get_fp8_bracketing_candidates_complex(
             tensor, fp8_dtype_target
         )
-        torch.testing.assert_close(low_cand, expected_low_cand, msg="Min val: Low cand")
         torch.testing.assert_close(
-            high_cand, expected_high_cand, msg="Min val: High cand"
+            low_cand.to(torch.float32),
+            expected_low_cand.to(torch.float32),
+            msg="Min val: Low cand",
+        )
+        torch.testing.assert_close(
+            high_cand.to(torch.float32),
+            expected_high_cand.to(torch.float32),
+            msg="Min val: High cand",
         )
 
     def test_mixed_values(self, orig_dtype, fp8_dtype_target):
@@ -253,8 +281,12 @@ class TestGetFP8BracketingCandidatesComplex:
         )
 
         torch.testing.assert_close(
-            low_cand, expected_low_cand, msg="Mixed values: Low cand"
+            low_cand.to(torch.float32),
+            expected_low_cand.to(torch.float32),
+            msg="Mixed values: Low cand",
         )
         torch.testing.assert_close(
-            high_cand, expected_high_cand, msg="Mixed values: High cand"
+            high_cand.to(torch.float32),
+            expected_high_cand.to(torch.float32),
+            msg="Mixed values: High cand",
         )

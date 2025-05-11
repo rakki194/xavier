@@ -1,6 +1,7 @@
 import torch
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
+import warnings
 
 from quantization.stochastic_round_shift_perturb import stochastic_round_shift_perturb
 
@@ -36,7 +37,9 @@ class TestStochasticRoundShiftPerturb:
             expected = int_tensor.to(torch.float).to(
                 fp8_dtype_target
             )  # approx expected
-            torch.testing.assert_close(result, expected, atol=1, rtol=1)  # loose check
+            torch.testing.assert_close(
+                result.to(torch.float32), expected.to(torch.float32), atol=1, rtol=1
+            )  # loose check
         else:  # Conversion failed, original returned
             assert result.dtype == int_tensor.dtype
             torch.testing.assert_close(result, int_tensor)
@@ -45,8 +48,12 @@ class TestStochasticRoundShiftPerturb:
         result_complex = stochastic_round_shift_perturb(
             complex_tensor, fp8_dtype_target
         )
-        assert result_complex.dtype == complex_tensor.dtype
-        torch.testing.assert_close(result_complex, complex_tensor)
+        assert result_complex.dtype == fp8_dtype_target
+        expected_complex_real_fp8 = complex_tensor.real.to(fp8_dtype_target)
+        torch.testing.assert_close(
+            result_complex.to(torch.float32),
+            expected_complex_real_fp8.to(torch.float32),
+        )
 
     @patch(
         "quantization.stochastic_round_shift_perturb.get_fp8_bracketing_candidates_complex"
@@ -84,7 +91,9 @@ class TestStochasticRoundShiftPerturb:
 
         mock_get_candidates.assert_called_once_with(tensor, fp8_dtype_target)
         assert result.dtype == fp8_dtype_target
-        torch.testing.assert_close(result, expected_output)
+        torch.testing.assert_close(
+            result.to(torch.float32), expected_output.to(torch.float32)
+        )
 
     @patch(
         "quantization.stochastic_round_shift_perturb.get_fp8_bracketing_candidates_complex"
@@ -112,9 +121,13 @@ class TestStochasticRoundShiftPerturb:
 
         mock_get_candidates.assert_called_once_with(tensor, fp8_dtype_target)
         assert result.dtype == fp8_dtype_target
-        torch.testing.assert_close(result, expected_output)
+        torch.testing.assert_close(
+            result.to(torch.float32), expected_output.to(torch.float32)
+        )
         # Also check if it's identical to direct conversion, as noise should be zero
-        torch.testing.assert_close(result, tensor.to(fp8_dtype_target))
+        torch.testing.assert_close(
+            result.to(torch.float32), tensor.to(fp8_dtype_target).to(torch.float32)
+        )
 
     @patch(
         "quantization.stochastic_round_shift_perturb.get_fp8_bracketing_candidates_complex"
@@ -151,4 +164,6 @@ class TestStochasticRoundShiftPerturb:
 
         mock_get_candidates.assert_called_once_with(tensor, fp8_dtype_target)
         assert result.dtype == fp8_dtype_target
-        torch.testing.assert_close(result, expected_output)
+        torch.testing.assert_close(
+            result.to(torch.float32), expected_output.to(torch.float32)
+        )

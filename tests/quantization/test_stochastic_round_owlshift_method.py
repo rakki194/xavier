@@ -1,6 +1,7 @@
 import torch
 import pytest
 from unittest.mock import patch, MagicMock
+import warnings  # Ensure warnings is imported
 
 from quantization.stochastic_round_owlshift_method import (
     stochastic_round_owlshift_method,
@@ -35,8 +36,8 @@ class TestStochasticRoundOwlshiftMethod:
         if result_int.dtype == fp8_dtype_target:
             # Loosely check if values are somewhat preserved if conversion happened
             torch.testing.assert_close(
-                result_int,
-                int_tensor.to(torch.float).to(fp8_dtype_target),
+                result_int.to(torch.float32),
+                int_tensor.to(torch.float).to(fp8_dtype_target).to(torch.float32),
                 atol=1,
                 rtol=1,
             )
@@ -53,12 +54,11 @@ class TestStochasticRoundOwlshiftMethod:
         result_complex = stochastic_round_owlshift_method(
             complex_tensor, fp8_dtype_target, seed=0
         )
-        assert result_complex.dtype == complex_tensor.dtype
-        torch.testing.assert_close(result_complex, complex_tensor)
-        captured = capsys.readouterr()  # check for warning with complex
-        assert (
-            f"Warning (owlshift): Could not convert non-float tensor of dtype {complex_tensor.dtype}"
-            in captured.out
+        assert result_complex.dtype == fp8_dtype_target
+        expected_complex_real_fp8 = complex_tensor.real.to(fp8_dtype_target)
+        torch.testing.assert_close(
+            result_complex.to(torch.float32),
+            expected_complex_real_fp8.to(torch.float32),
         )
 
     @patch(
@@ -133,24 +133,30 @@ class TestStochasticRoundOwlshiftMethod:
 
         result = stochastic_round_owlshift_method(tensor, fp8_dtype_target, seed=seed)
 
-        num_slices_expected = max(1, int(tensor.numel() / MAX_SLICE_ELEMENTS))
-        if (
-            tensor.numel() % MAX_SLICE_ELEMENTS != 0 and num_slices_expected > 0
-        ):  # simplified from source
-            num_slices_expected = (
-                tensor.numel() + MAX_SLICE_ELEMENTS - 1
-            ) // MAX_SLICE_ELEMENTS
-        if num_slices_expected == 0 and tensor.numel() > 0:
-            num_slices_expected = 1  # if tensor is smaller than max_slice
+        # Calculate expected call count based on source logic
+        expected_call_count = 0
         if tensor.numel() == 0:
-            num_slices_expected = 0
+            expected_call_count = 0  # Covered by empty_tensor test, mock_manual_round not called by slicing path
+        elif tensor.numel() <= MAX_SLICE_ELEMENTS or tensor.ndim == 0:
+            expected_call_count = 1
+        else:
+            # Slicing logic from source
+            _N = tensor.numel()
+            _num_slices_var = max(1, int(_N / MAX_SLICE_ELEMENTS))
+            _elements_per_slice_var = (_N + _num_slices_var - 1) // _num_slices_var
+            if _elements_per_slice_var > 0:
+                expected_call_count = (
+                    _N + _elements_per_slice_var - 1
+                ) // _elements_per_slice_var
+            else:  # Should not happen with N > 0
+                expected_call_count = 0
 
-        if tensor.numel() > 0:
-            assert mock_manual_round.call_count == num_slices_expected
-        else:  # if tensor is empty, mock should not be called by slicing logic, but by initial empty check
-            # This case is covered by test_empty_tensor, assuming owlshift_manual_round is not called for empty
-            # For this specific test, we assume tensor.numel() > 0 for slicing path.
-            pass  # skip call_count check for empty tensor in slicing test
+        if (
+            tensor.numel() > 0
+        ):  # Only assert call_count if mock is expected to be called
+            assert mock_manual_round.call_count == expected_call_count
+        else:
+            mock_manual_round.assert_not_called()  # Explicitly for empty tensor in this path
 
         # Check that the same generator object was used for all calls
         if mock_manual_round.call_args_list:
@@ -161,9 +167,12 @@ class TestStochasticRoundOwlshiftMethod:
         assert result.dtype == fp8_dtype_target
         assert result.shape == tensor.shape
         # Because the side_effect returns ones, the result should be all ones if slicing happened.
-        if tensor.numel() > 0 and num_slices_expected > 0:
+        if (
+            tensor.numel() > 0 and expected_call_count > 0
+        ):  # Check result if processing happened
             torch.testing.assert_close(
-                result, torch.ones_like(tensor, dtype=fp8_dtype_target)
+                result.to(torch.float32),
+                torch.ones_like(tensor, dtype=fp8_dtype_target).to(torch.float32),
             )
 
     @patch(

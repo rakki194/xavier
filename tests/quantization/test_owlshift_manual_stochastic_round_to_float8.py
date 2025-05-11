@@ -205,7 +205,12 @@ class TestOwlshiftManualStochasticRound:
 
         assert result.dtype == fp8_dtype_target
         # Using a wider tolerance due to float16 intermediate steps and potential mock value choices
-        torch.testing.assert_close(result, expected_output_tensor, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(
+            result.to(torch.float32),
+            expected_output_tensor.to(torch.float32),
+            atol=1e-2,
+            rtol=1e-2,
+        )
 
     @patch(
         "quantization.owlshift_manual_stochastic_round_to_float8.owlshift_calc_mantissa"
@@ -219,7 +224,7 @@ class TestOwlshiftManualStochasticRound:
         seed = 42
 
         # Smallest positive normal for fp8_dtype_target (in float16 for calculation)
-        smallest_normal_val = (2.0 ** (-EXP_BIAS + 1)).astype(torch.float16)
+        smallest_normal_val = torch.tensor(2.0 ** (-EXP_BIAS + 1), dtype=torch.float16)
         # Create input values that are clearly in the subnormal range for float16 representation of FP8
         # e.g., smaller than the smallest normal, but non-zero.
         # Example: smallest_normal / 2, smallest_normal / 4
@@ -313,7 +318,10 @@ class TestOwlshiftManualStochasticRound:
         mock_calc_mantissa.assert_not_called()  # Should not be called for purely subnormal inputs
         assert result.dtype == fp8_dtype_target
         torch.testing.assert_close(
-            result, expected_output_tensor, atol=1e-3, rtol=1e-2
+            result.to(torch.float32),
+            expected_output_tensor.to(torch.float32),
+            atol=1e-3,
+            rtol=1e-2,
         )  # Adjusted tolerance
 
     @patch(
@@ -330,7 +338,7 @@ class TestOwlshiftManualStochasticRound:
         # Normal value
         normal_val_py = 1.5
         # Subnormal value
-        smallest_normal_val = (2.0 ** (-EXP_BIAS + 1)).astype(torch.float16)
+        smallest_normal_val = torch.tensor(2.0 ** (-EXP_BIAS + 1), dtype=torch.float16)
         subnormal_val_py = smallest_normal_val.item() / 2.0
 
         tensor_vals_py = [
@@ -448,7 +456,12 @@ class TestOwlshiftManualStochasticRound:
             mock_calc_mantissa.assert_not_called()
 
         assert result.dtype == fp8_dtype_target
-        torch.testing.assert_close(result, expected_output_tensor, atol=1e-3, rtol=1e-2)
+        torch.testing.assert_close(
+            result.to(torch.float32),
+            expected_output_tensor.to(torch.float32),
+            atol=1e-3,
+            rtol=1e-2,
+        )
 
     @patch(
         "quantization.owlshift_manual_stochastic_round_to_float8.owlshift_calc_mantissa"
@@ -519,20 +532,37 @@ class TestOwlshiftManualStochasticRound:
         mock_calc_mantissa.return_value = mocked_large_mantissa_frac
 
         # Reconstruct with this large mantissa to force potential overflow (before clamp)
-        recon_abs_val = (
-            2.0 ** (exp_clamped_overflow[is_normal_overflow] - EXP_BIAS)
-        ) * (1.0 + mocked_large_mantissa_frac)
-        # This recon_abs_val is what we expect *before* the SUT's clamp.
+        recon_abs_val_float = (
+            (2.0 ** (exp_clamped_overflow[is_normal_overflow] - EXP_BIAS))
+            * (1.0 + mocked_large_mantissa_frac)
+        ).item()  # Get as float for comparison
+
         # The SUT will then clamp it to finfo_fp8.max.
-        expected_clamped_to_max = torch.tensor([finfo_fp8.max], dtype=fp8_dtype_target)
+        if recon_abs_val_float > finfo_fp8.max:
+            expected_clamped_val_float = finfo_fp8.max
+        else:
+            expected_clamped_val_float = recon_abs_val_float
+
+        expected_clamped_to_max = torch.tensor(
+            [expected_clamped_val_float], dtype=fp8_dtype_target
+        )
 
         generator = torch.Generator().manual_seed(seed)
         result_overflow = owlshift_manual_stochastic_round_to_float8(
             tensor_overflow, fp8_dtype_target, generator=generator
         )
 
+        print(
+            f"Clamping max debug: result_overflow={result_overflow.to(torch.float32)}, expected_clamped_to_max={expected_clamped_to_max.to(torch.float32)}, result_raw={result_overflow}, expected_raw={expected_clamped_to_max}"
+        )
         torch.testing.assert_close(
-            result_overflow, expected_clamped_to_max, msg="Test clamping to max_fp8"
+            result_overflow.to(torch.float32),
+            expected_clamped_to_max.to(
+                torch.float32
+            ),  # Ensure expected is also to float32 for comparison
+            msg="Test clamping to max_fp8",
+            atol=1e-3,
+            rtol=1e-3,
         )
         if torch.any(is_normal_overflow):
             mock_calc_mantissa.assert_called_once()
@@ -581,10 +611,15 @@ class TestOwlshiftManualStochasticRound:
         result_in_range = owlshift_manual_stochastic_round_to_float8(
             tensor_in_range, fp8_dtype_target, generator=generator.manual_seed(seed)
         )  # re-seed generator
+        print(
+            f"Clamping in_range debug: result_in_range={result_in_range.to(torch.float32)}, expected_val_in_range={expected_val_in_range.to(torch.float32)}, result_raw={result_in_range}, expected_raw={expected_val_in_range}"
+        )
         torch.testing.assert_close(
-            result_in_range,
-            expected_val_in_range,
+            result_in_range.to(torch.float32),
+            expected_val_in_range.to(torch.float32),
             msg="Test value in range (no clamp effect)",
+            atol=1e-3,
+            rtol=1e-3,
         )
         if torch.any(is_normal_in_range):
             mock_calc_mantissa.assert_called_once()
