@@ -743,16 +743,26 @@ def main():
                 )  # Store on CPU
                 # Store the scale factor with a conventional key for ComfyUI
                 # Example: model.0.weight -> model.0.scale_weight or similar. Needs specific key naming.
-                # For now, let's assume a simple convention if we were to save it.
                 # This script focuses on tensor quantization, ComfyUI keying is separate.
                 # We'll just print it for now.
                 if scale_factor_for_comfyui_to_save is not None:
-                    # This is where you would add the scale to the state_dict with an appropriate key
-                    # For example: quantized_state_dict[key.replace(".weight", ".scale_weight")] = scale_factor_for_comfyui_to_save
-                    print(
-                        f" (Scale: {scale_factor_for_comfyui_to_save.item():.4g})",
-                        end="",
-                    )
+                    if key.endswith(".weight"):
+                        scale_key = key.replace(".weight", ".scale_weight")
+                        # ComfyUI expects scale_weight to be float32.
+                        # scale_factor_for_comfyui_to_save is currently float64 on CPU.
+                        scale_to_save = scale_factor_for_comfyui_to_save.to(
+                            torch.float32
+                        )
+                        quantized_state_dict[scale_key] = scale_to_save
+                        print(
+                            f" (Scale: {scale_to_save.item():.4g}, Saved as: {scale_key})",
+                            end="",
+                        )
+                    else:
+                        print(
+                            f" (Scale: {scale_factor_for_comfyui_to_save.item():.4g}, Not saved for key {key} as it doesn't end with .weight)",
+                            end="",
+                        )
 
             elif (
                 any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
