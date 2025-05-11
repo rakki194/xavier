@@ -23,7 +23,9 @@ DEVICE="cuda" # Or "cpu" if cuda is not available/preferred
 # --- End Configuration ---
 
 # FP8 types
-fp8_types=("e4m3" "e5m2")
+# I don't like e5m2, so I'm not running it.
+#fp8_types=("e4m3" "e5m2")
+fp8_types=("e4m3")
 
 # Rounding methods:
 # Key is the flag to pass to xavier.py ("" for default)
