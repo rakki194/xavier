@@ -678,6 +678,7 @@ def main():
 
         main_seed = args.seed
         plots_generated_count = 0
+        quantized_count = 0
 
         for i, (key, tensor) in enumerate(state_dict.items()):
             original_tensor_for_plot_and_type = None
