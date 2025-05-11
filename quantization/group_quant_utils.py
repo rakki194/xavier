@@ -25,54 +25,93 @@ def quantize_symmetric_per_group(
         raise TypeError("Input tensor must be a PyTorch Tensor.")
     if not (input_tensor.ndim == 1 or input_tensor.ndim == 2):
         raise ValueError("Input tensor must be 1D or 2D.")
-    if input_tensor.shape[-1] % group_size != 0:
-        raise ValueError(
-            f"The last dimension ({input_tensor.shape[-1]}) must be divisible by group_size ({group_size})."
-        )
     if not (1 < num_bits <= 8):
         raise ValueError("num_bits must be between 2 and 8 for int8 storage.")
 
-    original_shape = input_tensor.shape
-    last_dim_size = original_shape[-1]
+    original_input_shape = input_tensor.shape
+    last_dim_size = original_input_shape[-1]
     device = input_tensor.device
 
-    if input_tensor.ndim == 1:
-        reshaped_tensor = input_tensor.reshape(-1, group_size)
+    # Pad the tensor if the last dimension is not divisible by group_size
+    padding_needed = (group_size - (last_dim_size % group_size)) % group_size
+    if padding_needed > 0:
+        if input_tensor.ndim == 1:
+            pad_dims = (0, padding_needed)  # Pad only at the end for 1D
+        else:  # 2D
+            # For 2D tensor (dim0, dim1), pad_dims should be (left, right, top, bottom)
+            # We only want to pad the last dimension (dim1) on the right.
+            pad_dims = (0, padding_needed, 0, 0)
+        input_tensor_processed = torch.nn.functional.pad(
+            input_tensor, pad_dims, mode="constant", value=0
+        )
+    else:
+        input_tensor_processed = input_tensor
+
+    current_shape = (
+        input_tensor_processed.shape
+    )  # Shape of the (potentially padded) tensor
+
+    if input_tensor_processed.ndim == 1:
+        # Reshape to (-1, group_size) for group-wise operations
+        reshaped_tensor = input_tensor_processed.reshape(-1, group_size)
     else:  # 2D
-        reshaped_tensor = input_tensor.reshape(
-            -1, group_size
-        )  # Shape: (dim0 * dim1/group_size, group_size)
-        # This flattens all leading dimensions. Scales will then correspond to these flattened groups.
-        # Scales shape will be (dim0 * dim1/group_size,)
+        # Reshape to (original_dim0, num_groups_in_last_dim, group_size)
+        # then flatten leading two to (-1, group_size)
+        # This ensures scales correspond to original_dim0 * num_groups
+        num_groups_in_last_dim = current_shape[-1] // group_size
+        reshaped_tensor = input_tensor_processed.reshape(
+            current_shape[0] * num_groups_in_last_dim, group_size
+        )
 
     # Calculate scale for each group
     max_abs_vals = torch.max(torch.abs(reshaped_tensor), dim=1, keepdim=True).values
 
     # For symmetric quantization, q_max corresponds to 2^(num_bits-1) - 1 for signed types
     q_max = (2 ** (num_bits - 1)) - 1
-    epsilon = torch.finfo(max_abs_vals.dtype).eps
-    scales = max_abs_vals / (q_max + epsilon)  # Add epsilon to prevent division by zero
-    scales = scales.to(dtype=scale_dtype)
+
+    # Perform scale calculation in float32 for potentially better precision,
+    # especially if max_abs_vals are low-precision floats (bf16, fp16).
+    max_abs_vals_fp32 = max_abs_vals.to(torch.float32)
+    # Use float32 epsilon for the calculation to avoid issues if max_abs_vals_fp32 is near zero.
+    epsilon_fp32 = torch.finfo(torch.float32).eps
+    scales_fp32 = max_abs_vals_fp32 / (q_max + epsilon_fp32)
+
+    # Convert calculated scales to the desired scale_dtype
+    scales = scales_fp32.to(dtype=scale_dtype)
 
     # Quantize
-    # quantized_values_float = reshaped_tensor / scales.to(reshaped_tensor.dtype) # back to full float for division
-    # A more stable way to quantize, especially if scales can be very small:
-    quantized_values_float = reshaped_tensor * (1.0 / scales.to(reshaped_tensor.dtype))
-    quantized_values = torch.round(quantized_values_float).to(torch.int8)
+    # Convert reshaped_tensor to float32 for stable calculations
+    reshaped_tensor_fp32 = reshaped_tensor.to(torch.float32)
+
+    # Calculate inverse of scales in float32
+    inv_scales_fp32 = 1.0 / scales.to(torch.float32)
+
+    # Perform scaling in float32
+    scaled_values_fp32 = reshaped_tensor_fp32 * inv_scales_fp32
+
+    # Round in float32, then convert to int8
+    quantized_values = torch.round(scaled_values_fp32).to(torch.int8)
 
     # Clamp to the representable range for num_bits
     q_min = -(2 ** (num_bits - 1))
     quantized_values = torch.clamp(quantized_values, min=q_min, max=q_max)
 
-    # Reshape scales and quantized_values to match grouping on original last dimension
-    if input_tensor.ndim == 1:
-        scales = scales.squeeze(-1)  # Shape (num_groups,)
-        quantized_values = quantized_values.reshape(original_shape)  # Reshape back
+    # Reshape scales and quantized_values
+    # Scales should correspond to the number of groups in the processed tensor
+    # Quantized values should have the shape of the processed tensor
+
+    if input_tensor_processed.ndim == 1:
+        scales = scales.squeeze(-1)  # Shape (num_total_groups,)
+        # quantized_values is already (num_total_groups, group_size), reshape to processed shape
+        quantized_values = quantized_values.reshape(current_shape)
     else:  # 2D
-        num_groups_last_dim = last_dim_size // group_size
-        scales_shape = list(original_shape[:-1]) + [num_groups_last_dim]
-        scales = scales.reshape(scales_shape)
-        quantized_values = quantized_values.reshape(original_shape)
+        num_groups_last_dim = current_shape[-1] // group_size
+        # scales_shape = (current_shape[0], num_groups_last_dim)
+        # The reshape for scales earlier already made it (current_shape[0] * num_groups_last_dim, 1)
+        # So it should be reshaped to (current_shape[0], num_groups_last_dim)
+        scales = scales.reshape(current_shape[0], num_groups_last_dim)
+        # quantized_values is (current_shape[0] * num_groups_last_dim, group_size)
+        quantized_values = quantized_values.reshape(current_shape)
 
     return quantized_values, scales
 

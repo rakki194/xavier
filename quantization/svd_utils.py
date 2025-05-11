@@ -20,39 +20,92 @@ def decompose_weights_svd(hat_W, r):
         raise TypeError("Input hat_W must be a PyTorch Tensor.")
     if not hat_W.ndim == 2:
         raise ValueError("Input hat_W must be a 2D matrix.")
-    if not isinstance(r, int) or r <= 0:
-        raise ValueError("Rank r must be a positive integer.")
-    if r > min(hat_W.shape):
+    if not isinstance(r, int):
+        raise ValueError("Rank r must be an integer.")
+
+    original_r_for_error_msg = r
+    # Clamp r to be at most the smallest dimension of hat_W
+    r_eff = min(r, min(hat_W.shape[0], hat_W.shape[1]))
+
+    if r_eff <= 0:
         raise ValueError(
-            f"Rank r ({r}) cannot be greater than the smallest dimension of hat_W ({min(hat_W.shape)})."
+            f"Rank r must be positive after clamping (original r was {original_r_for_error_msg}, matrix shape {hat_W.shape}, effective r {r_eff})."
         )
 
     # Ensure hat_W is in float32 for SVD computation for numerical stability
     hat_W_float32 = hat_W.float()
 
+    # Check if the entire tensor is NaN. If so, SVD is not meaningful and will warn/error.
+    # Directly return NaN tensors in this case.
+    if torch.all(torch.isnan(hat_W_float32)):
+        m_dim, n_dim = hat_W.shape
+        L1_nan = torch.full(
+            (m_dim, r_eff),
+            float("nan"),
+            dtype=hat_W_float32.dtype,
+            device=hat_W_float32.device,
+        )
+        L2_nan = torch.full(
+            (r_eff, n_dim),
+            float("nan"),
+            dtype=hat_W_float32.dtype,
+            device=hat_W_float32.device,
+        )
+        R_nan = torch.full(
+            (m_dim, n_dim),
+            float("nan"),
+            dtype=hat_W_float32.dtype,
+            device=hat_W_float32.device,
+        )
+        return L1_nan, L2_nan, R_nan
+
     # 1. Perform SVD
-    # torch.linalg.svd returns U, S (singular values as a 1D tensor), V (not Vh or Vt)
+    # torch.linalg.svd returns U, S, Vh (where Vh is V_transpose or V_conjugate_transpose)
     # V is the matrix whose columns are the right singular vectors.
     # So, V.mH (adjoint) or V.T (if real) gives V_transpose.
     try:
-        U, S_diag, V = torch.linalg.svd(hat_W_float32, full_matrices=False)
+        # torch.linalg.svd returns U, S, Vh (where Vh is V_transpose or V_conjugate_transpose)
+        U_svd, S_diag_svd, Vh_from_svd = torch.linalg.svd(
+            hat_W_float32, full_matrices=False
+        )
     except Exception as e:
-        # Handle potential SVD convergence issues, though rare with full_matrices=False
-        # and float32 inputs for well-behaved matrices.
-        raise RuntimeError(f"SVD computation failed: {e}")
+        # Handle potential SVD convergence issues
+        # Return NaN tensors as per test expectations for SVD failure
+        # print(f"SVD computation failed: {e}. Returning NaN tensors.") # For debugging
+        m_dim, n_dim = hat_W.shape
+        L1_nan = torch.full(
+            (m_dim, r_eff),
+            float("nan"),
+            dtype=hat_W_float32.dtype,
+            device=hat_W_float32.device,
+        )
+        L2_nan = torch.full(
+            (r_eff, n_dim),
+            float("nan"),
+            dtype=hat_W_float32.dtype,
+            device=hat_W_float32.device,
+        )
+        R_nan = torch.full(
+            (m_dim, n_dim),
+            float("nan"),
+            dtype=hat_W_float32.dtype,
+            device=hat_W_float32.device,
+        )
+        return L1_nan, L2_nan, R_nan
 
     # Vh is V conjugate transpose (or just transpose if hat_W is real)
-    Vh = V.mH  # Use .mH for generality, it's .T if matrix is real.
+    # Vh = V.mH  # Use .mH for generality, it\'s .T if matrix is real. # This line is incorrect as V from svd is Vh
 
     # 2. Rank r is an input, already validated.
+    # Use r_eff (clamped and validated rank)
 
     # 3. Form L1 and L2
-    # L1 = U[:, :r] @ torch.diag(S_diag[:r])
-    # A more direct way for L1: scale first r columns of U by first r singular values
-    L1_high_precision = U[:, :r] * S_diag[:r].unsqueeze(
+    # L1 = U[:, :r_eff] @ torch.diag(S_diag[:r_eff])
+    # A more direct way for L1: scale first r_eff columns of U by first r_eff singular values
+    L1_high_precision = U_svd[:, :r_eff] * S_diag_svd[:r_eff].unsqueeze(
         0
-    )  # S_diag[:r] is (r), unsqueeze to (1,r) for broadcasting
-    L2_high_precision = Vh[:r, :]
+    )  # S_diag_svd[:r_eff] is (r_eff), unsqueeze to (1,r_eff) for broadcasting
+    L2_high_precision = Vh_from_svd[:r_eff, :]  # Use Vh_from_svd directly
 
     # According to the paper, L1 and L2 are stored/used in 16-bit precision.
     # We return them in high precision here; conversion to FP16 can be done by the caller

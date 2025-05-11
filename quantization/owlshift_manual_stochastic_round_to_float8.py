@@ -1,8 +1,8 @@
 import torch
-from ._owlshift_calc_mantissa import _owlshift_calc_mantissa
+from .owlshift_calc_mantissa import owlshift_calc_mantissa
 
 
-def _owlshift_manual_stochastic_round_to_float8(
+def owlshift_manual_stochastic_round_to_float8(
     x_chunk: torch.Tensor, target_fp8_dtype: torch.dtype, generator=None
 ):
     if target_fp8_dtype == torch.float8_e4m3fn:
@@ -39,7 +39,7 @@ def _owlshift_manual_stochastic_round_to_float8(
     mantissa_values = torch.zeros_like(abs_x)
 
     if torch.any(normal_mask):
-        mantissa_values[normal_mask] = _owlshift_calc_mantissa(
+        mantissa_values[normal_mask] = owlshift_calc_mantissa(
             abs_x[normal_mask],
             exponent[normal_mask],
             torch.ones_like(abs_x[normal_mask], dtype=torch.bool),

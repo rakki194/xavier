@@ -1,6 +1,6 @@
 import torch
-from ._owlshift_manual_stochastic_round_to_float8 import (
-    _owlshift_manual_stochastic_round_to_float8,
+from .owlshift_manual_stochastic_round_to_float8 import (
+    owlshift_manual_stochastic_round_to_float8,
 )
 
 
@@ -29,7 +29,7 @@ def stochastic_round_owlshift_method(
 
     if tensor.numel() <= MAX_SLICE_ELEMENTS or tensor.ndim == 0:
         output.copy_(
-            _owlshift_manual_stochastic_round_to_float8(
+            owlshift_manual_stochastic_round_to_float8(
                 tensor, target_fp8_dtype, generator=generator
             )
         )
@@ -42,7 +42,7 @@ def stochastic_round_owlshift_method(
 
         for i in range(0, tensor_flat.numel(), elements_per_slice):
             chunk = tensor_flat[i : i + elements_per_slice]
-            processed_chunk = _owlshift_manual_stochastic_round_to_float8(
+            processed_chunk = owlshift_manual_stochastic_round_to_float8(
                 chunk, target_fp8_dtype, generator=generator
             )
             output_flat[i : i + elements_per_slice].copy_(processed_chunk)
