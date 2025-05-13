@@ -8,4 +8,3 @@ from .owlshift_calc_mantissa import owlshift_calc_mantissa
 from .owlshift_manual_stochastic_round_to_float8 import (
     owlshift_manual_stochastic_round_to_float8,
 )
-from .svdquant_layer import SVDQuantLinear
