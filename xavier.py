@@ -775,34 +775,47 @@ def main():
             quantized_tensor_cpu_for_plot = quantized_state_dict[key].cpu()
 
             dequantized_tensor_cpu_for_plot = None
+            scale_for_plot_display = 1.0  # Default for native, or if TorchAO scale cannot be determined for display
 
             if is_torchao_method:
-                # Attempt to dequantize TorchAO tensor for plotting
-                _scale_key_to_use_plot_ = ""
-                scale_key_parts_plot = key.split(".")
-                if scale_key_parts_plot[-1] == "weight":
-                    scale_key_parts_plot[-1] = "scale_weight"
-                    _scale_key_to_use_plot_ = ".".join(scale_key_parts_plot)
-                else:
-                    _scale_key_to_use_plot_ = key + ".scale_absmax"
-
-                if _scale_key_to_use_plot_ in quantized_state_dict:
-                    scale_cpu_plot = quantized_state_dict[_scale_key_to_use_plot_].cpu()
-
-                    # Simplified dequantization for plotting:
-                    # Cast FP8 data to float32, multiply by scale (also float32), then cast to original tensor's dtype.
-                    # Ensure scale_cpu_plot is treated as raw, detached data.
-                    dequant_hp_plot = quantized_tensor_cpu_for_plot.to(
-                        torch.float32
-                    ) * scale_cpu_plot.clone().detach().to(torch.float32)
-                    dequantized_tensor_cpu_for_plot = dequant_hp_plot.to(
-                        original_tensor_cpu_for_plot.dtype
+                # For TorchAO, AffineQuantizedTensor has a dequantize method
+                if hasattr(quantized_tensor_cpu_for_plot, "dequantize"):
+                    dequantized_tensor_cpu_for_plot = (
+                        quantized_tensor_cpu_for_plot.dequantize().to(
+                            original_tensor_cpu_for_plot.dtype
+                        )
                     )
-
+                    # Try to get scale for plot title/info, if available
+                    if hasattr(quantized_tensor_cpu_for_plot, "_scale"):
+                        if (
+                            isinstance(
+                                quantized_tensor_cpu_for_plot._scale, torch.Tensor
+                            )
+                            and quantized_tensor_cpu_for_plot._scale.numel() == 1
+                        ):
+                            scale_for_plot_display = (
+                                quantized_tensor_cpu_for_plot._scale.item()
+                            )
+                        elif isinstance(
+                            quantized_tensor_cpu_for_plot._scale, (int, float)
+                        ):
+                            scale_for_plot_display = (
+                                quantized_tensor_cpu_for_plot._scale
+                            )
+                    elif (
+                        "comfyscale" in args.quant_method
+                    ):  # Attempt to retrieve comfyscale factor if used with torchao
+                        # This logic assumes scale_factor_for_comfyui_to_save might be relevant if torchao_comfyscale was used
+                        # and it stored the scale in a way that this variable captures it (might need adjustment based on actual storage)
+                        if scale_factor_for_comfyui_to_save is not None:
+                            scale_for_plot_display = (
+                                scale_factor_for_comfyui_to_save.cpu().item()
+                            )
                 else:
                     print(
-                        f"      Warning: Scale not found for TorchAO-quantized tensor {key} for plotting. Using direct cast."
+                        f"      Warning: TorchAO-quantized tensor {key} does not have a .dequantize() method. Plotting may be inaccurate."
                     )
+                    # Fallback: try to cast to original dtype, but this is unlikely to be meaningful without dequant
                     dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
                         original_tensor_cpu_for_plot.dtype
                     )
@@ -811,19 +824,28 @@ def main():
                 # Dequantization is multiplication by scale.
                 if (
                     args.comfyscale
-                    and scale_factor_for_comfyui_to_save is not None
+                    and scale_factor_for_comfyui_to_save
+                    is not None  # This is the scale from native comfyscale path
                     and not key.endswith(".bias")
-                ):  # scale_factor_for_comfyui_to_save is from comfyscale path
+                ):
+                    scale_for_plot_display = (
+                        scale_factor_for_comfyui_to_save.cpu().item()
+                    )
                     dequantized_tensor_cpu_for_plot = (
                         quantized_tensor_cpu_for_plot.to(
-                            scale_factor_for_comfyui_to_save.dtype
+                            scale_factor_for_comfyui_to_save.dtype  # Use scale's dtype for intermediate mult
                         )
-                        * scale_factor_for_comfyui_to_save.cpu()
-                    ).to(original_tensor_cpu_for_plot.dtype)
+                        * scale_factor_for_comfyui_to_save.cpu()  # Multiply by the scale
+                    ).to(
+                        original_tensor_cpu_for_plot.dtype
+                    )  # Cast back to original
                 else:  # General FP8 path (no explicit scale factor saved alongside, dequant is just type cast)
                     dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
                         original_tensor_cpu_for_plot.dtype
                     )
+
+            # The generate_comparison_plots function expects a 'scale_value' for its title.
+            # We've prepared 'scale_for_plot_display' for this purpose.
 
             if dequantized_tensor_cpu_for_plot is not None:
                 safe_tensor_key_for_filename = key.replace("/", "_").replace(".", "_")
@@ -835,13 +857,14 @@ def main():
 
                 generate_comparison_plots(
                     original_tensor_cpu=original_tensor_cpu_for_plot,
-                    quantized_fp8_tensor_cpu=quantized_tensor_cpu_for_plot,
-                    dequantized_tensor_cpu=dequantized_tensor_cpu_for_plot,
+                    quantized_fp8_tensor_cpu=quantized_tensor_cpu_for_plot,  # This is the raw FP8 tensor
+                    dequantized_tensor_cpu=dequantized_tensor_cpu_for_plot,  # This is the dequantized tensor in higher precision
                     tensor_key=key,
                     plot_filename=plot_file_path,
                     original_dtype_str=original_dtype_name,
                     fp8_dtype_str=fp8_dtype_name,
                     sample_size=args.plot_sample_size,
+                    scale_value=scale_for_plot_display,  # Pass the determined scale for display
                 )
                 plots_generated_count += 1
             else:
