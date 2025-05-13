@@ -1,10 +1,11 @@
 import torch
 import argparse
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 import os
 from quantization import stochastic_round_tensor_to_fp8
 from scaling import get_fp8_constants_for_owlscale
 from plotting_utils import MATPLOTLIB_AVAILABLE, generate_comparison_plots
+from safetensors_utils import load_tensor_from_safetensors, get_safetensors_tensor_keys
 
 """
 Quantizes a .safetensors model to FP8 using various stochastic rounding techniques.
@@ -128,15 +129,21 @@ def main():
     else:
         raise ValueError(f"Unsupported fp8_type: {args.fp8_type}")
 
-    print(f"FP8 Path: Loading model from: {args.input_file}")
+    print(f"FP8 Path: Loading model metadata from: {args.input_file}")
     try:
-        state_dict = load_file(args.input_file, device="cpu")
+        tensor_keys = get_safetensors_tensor_keys(args.input_file)
+        if not tensor_keys:
+            print(
+                f"Error: No tensors found in {args.input_file} or could not read keys."
+            )
+            return
+        print(f"Found {len(tensor_keys)} tensor keys in {args.input_file}")
     except Exception as e:
-        print(f"Error loading model: {e}")
+        print(f"Error loading tensor keys from model: {e}")
         return
 
     quantized_state_dict = {}
-    total_tensors = len(state_dict)
+    total_tensors = len(tensor_keys)
 
     print(
         f"FP8 Path: Target FP8 type: {fp8_dtype}, Device for quantization: {main_device}"
@@ -182,7 +189,19 @@ def main():
     plots_generated_count = 0
     quantized_count = 0
 
-    for i, (key, tensor) in enumerate(state_dict.items()):
+    for i, key in enumerate(tensor_keys):
+        try:
+            # Load tensor on-the-fly
+            # We load to CPU first as original script did, then move to main_device if needed
+            tensor = load_tensor_from_safetensors(args.input_file, key, device="cpu")
+        except Exception as e:
+            print(f"\nError loading tensor {key}: {e}. Skipping this tensor.")
+            if (
+                key in quantized_state_dict
+            ):  # Should not happen if loading failed before processing
+                del quantized_state_dict[key]
+            continue
+
         original_tensor_for_plot_and_type = None
         if args.plot and plots_generated_count < args.plot_max_tensors:
             original_tensor_for_plot_and_type = tensor.detach().clone().cpu()

@@ -85,7 +85,8 @@ class TestXavierMain:
         captured = capsys.readouterr()
         assert "Error: Input file not found" in captured.out
 
-    @patch("xavier.load_file")
+    @patch("xavier.get_safetensors_tensor_keys")
+    @patch("xavier.load_tensor_from_safetensors")
     @patch("xavier.save_file")
     @patch("xavier.stochastic_round_tensor_to_fp8")
     @patch("argparse.ArgumentParser.parse_args")
@@ -94,22 +95,30 @@ class TestXavierMain:
         mock_parse_args,
         mock_stochastic_round,
         mock_save_file,
-        mock_load_file,
+        mock_load_tensor,
+        mock_get_keys,
         mock_args,
         capsys,
     ):
         """Test a basic run through the quantization process, mocking external calls."""
         mock_parse_args.return_value = mock_args
 
-        # Mock load_file to return a simple state dict
-        dummy_state_dict = {
+        # Define the dummy tensors and their keys
+        dummy_tensors = {
             "layer1.weight": torch.randn(10, 5, dtype=torch.float32),
             "layer1.bias": torch.randn(10, dtype=torch.float32),
-            "other_tensor": torch.randint(
-                0, 10, (5,), dtype=torch.int32
-            ),  # Non-float tensor
+            "other_tensor": torch.randint(0, 10, (5,), dtype=torch.int32),
         }
-        mock_load_file.return_value = dummy_state_dict
+        dummy_keys = list(dummy_tensors.keys())
+
+        # Mock get_safetensors_tensor_keys to return the list of keys
+        mock_get_keys.return_value = dummy_keys
+
+        # Mock load_tensor_from_safetensors to return the correct tensor based on the key
+        def load_side_effect(file_path, key, device):
+            return dummy_tensors[key]
+
+        mock_load_tensor.side_effect = load_side_effect
 
         # Mock stochastic_round_tensor_to_fp8 to return a tensor of the target dtype
         def mock_round_func(
@@ -128,7 +137,12 @@ class TestXavierMain:
         xavier.main()
 
         # Assertions
-        mock_load_file.assert_called_once_with(mock_args.input_file, device="cpu")
+        mock_get_keys.assert_called_once_with(mock_args.input_file)
+
+        # Check that load_tensor_from_safetensors was called for each key
+        assert mock_load_tensor.call_count == len(dummy_keys)
+        for key in dummy_keys:
+            mock_load_tensor.assert_any_call(mock_args.input_file, key, device="cpu")
 
         # Check that stochastic_round was called for the .weight tensor
         # It should be called once because only "layer1.weight" matches the suffix.
@@ -149,7 +163,7 @@ class TestXavierMain:
         called_debug_mode_arg = kw_args_dict["debug_mode"]
 
         torch.testing.assert_close(
-            called_tensor_arg, dummy_state_dict["layer1.weight"].to(mock_args.device)
+            called_tensor_arg, dummy_tensors["layer1.weight"].to(mock_args.device)
         )
         assert called_fp8_dtype_arg == torch.float8_e4m3fn
         assert called_complex_method_arg == mock_args.complex_rounding
@@ -166,14 +180,14 @@ class TestXavierMain:
         assert "layer1.bias" in saved_state_dict_call  # Bias should be passed through
         torch.testing.assert_close(
             saved_state_dict_call["layer1.bias"],
-            dummy_state_dict["layer1.bias"].to(mock_args.device),
+            dummy_tensors["layer1.bias"].to(mock_args.device),
         )
         assert (
             "other_tensor" in saved_state_dict_call
         )  # Non-float tensor passed through
         torch.testing.assert_close(
             saved_state_dict_call["other_tensor"],
-            dummy_state_dict["other_tensor"].to(mock_args.device),
+            dummy_tensors["other_tensor"].to(mock_args.device),
         )
 
         captured = capsys.readouterr()
@@ -183,7 +197,8 @@ class TestXavierMain:
             expected_quant_line_part in captured.out
         ), f"Expected part '{expected_quant_line_part}' not found in stdout: {captured.out}"
 
-    @patch("xavier.load_file")
+    @patch("xavier.get_safetensors_tensor_keys")
+    @patch("xavier.load_tensor_from_safetensors")
     @patch("xavier.save_file")
     @patch("xavier.stochastic_round_tensor_to_fp8")
     @patch("argparse.ArgumentParser.parse_args")
@@ -192,12 +207,18 @@ class TestXavierMain:
         mock_parse_args,
         mock_stochastic_round,
         mock_save_file,
-        mock_load_file,
+        mock_load_tensor,
+        mock_get_keys,
         mock_args,
     ):
         mock_args.fp8_type = "e5m2"
         mock_parse_args.return_value = mock_args
-        mock_load_file.return_value = {"t.weight": torch.randn(2, 2)}
+
+        dummy_key = "t.weight"
+        dummy_tensor_val = torch.randn(2, 2)
+        mock_get_keys.return_value = [dummy_key]
+        mock_load_tensor.return_value = dummy_tensor_val
+
         mock_stochastic_round.return_value = torch.randn(2, 2).to(torch.float8_e5m2)
 
         xavier.main()
@@ -205,9 +226,10 @@ class TestXavierMain:
         assert mock_stochastic_round.call_args.kwargs["fp8_dtype"] == torch.float8_e5m2
         # Check that the saved tensor is e5m2
         saved_state_dict = mock_save_file.call_args[0][0]
-        assert saved_state_dict["t.weight"].dtype == torch.float8_e5m2
+        assert saved_state_dict[dummy_key].dtype == torch.float8_e5m2
 
-    @patch("xavier.load_file")
+    @patch("xavier.get_safetensors_tensor_keys")
+    @patch("xavier.load_tensor_from_safetensors")
     @patch("xavier.save_file")
     @patch("xavier.stochastic_round_tensor_to_fp8")
     @patch("argparse.ArgumentParser.parse_args")
@@ -216,16 +238,24 @@ class TestXavierMain:
         mock_parse_args,
         mock_stochastic_round,
         mock_save_file,
-        mock_load_file,
+        mock_load_tensor,
+        mock_get_keys,
         mock_args,
     ):
-        dummy_state_dict = {
+        dummy_tensors = {
             "layer1.weight": torch.randn(2, 2),
             "layer1.bias": torch.randn(2),
             "layer2.data": torch.randn(3, 3),
             "another.weight": torch.randn(4, 4),
         }
-        mock_load_file.return_value = dummy_state_dict
+        dummy_keys = list(dummy_tensors.keys())
+        mock_get_keys.return_value = dummy_keys
+
+        def load_side_effect(file_path, key, device):
+            return dummy_tensors[key]
+
+        mock_load_tensor.side_effect = load_side_effect
+
         mock_stochastic_round.return_value = torch.randn(1, 1).to(
             torch.float8_e4m3fn
         )  # Dummy return
@@ -256,7 +286,8 @@ class TestXavierMain:
     @pytest.mark.parametrize(
         "flag_to_test", ["complex_rounding", "shifturb", "owlshift"]
     )
-    @patch("xavier.load_file")
+    @patch("xavier.get_safetensors_tensor_keys")
+    @patch("xavier.load_tensor_from_safetensors")
     @patch("xavier.save_file")
     @patch("xavier.stochastic_round_tensor_to_fp8")
     @patch("argparse.ArgumentParser.parse_args")
@@ -265,7 +296,8 @@ class TestXavierMain:
         mock_parse_args,
         mock_stochastic_round,
         mock_save_file,
-        mock_load_file,
+        mock_load_tensor,
+        mock_get_keys,
         mock_args,
         flag_to_test,
     ):
@@ -275,7 +307,13 @@ class TestXavierMain:
         mock_args.owlshift = flag_to_test == "owlshift"
         mock_parse_args.return_value = mock_args
 
-        mock_load_file.return_value = {"t.weight": torch.randn(2, 2)}
+        # Mock get_keys and load_tensor for this test
+        # Assume a single tensor is enough for testing flags
+        dummy_key = "test.weight"
+        dummy_tensor_val = torch.randn(2, 2, dtype=torch.float32)
+        mock_get_keys.return_value = [dummy_key]
+        mock_load_tensor.return_value = dummy_tensor_val
+
         mock_stochastic_round.return_value = torch.randn(2, 2).to(torch.float8_e4m3fn)
 
         xavier.main()
@@ -311,7 +349,8 @@ class TestXavierMain:
         assert kwargs_passed["seed"] == mock_args.seed
         assert kwargs_passed["debug_mode"] == mock_args.debug
 
-    @patch("xavier.load_file")
+    @patch("xavier.get_safetensors_tensor_keys")
+    @patch("xavier.load_tensor_from_safetensors")
     @patch("xavier.save_file")
     @patch("xavier.stochastic_round_tensor_to_fp8")
     @patch("xavier.get_fp8_constants_for_owlscale")
@@ -322,120 +361,184 @@ class TestXavierMain:
         mock_get_constants,
         mock_stochastic_round,
         mock_save_file,
-        mock_load_file,
+        mock_load_tensor,
+        mock_get_keys,
         mock_args,
         capsys,
     ):
         mock_args.owlscale = True
-        mock_args.fp8_type = "e4m3"
-        mock_args.device = "cpu"
+        mock_args.keys_to_quantize_suffix = [".weight"]
         mock_parse_args.return_value = mock_args
 
-        fp8_dtype_target = torch.float8_e4m3fn
+        # Mock get_keys and load_tensor
+        dummy_tensors = {
+            "layer.weight": torch.randn(5, 5, dtype=torch.float32)
+            * 10,  # Multiplied to ensure abs_max is not too small
+            "layer.bias": torch.randn(5, dtype=torch.float32),
+        }
+        dummy_keys = list(dummy_tensors.keys())
+        mock_get_keys.return_value = dummy_keys
 
+        def load_side_effect(file_path, key, device):
+            return dummy_tensors[key]
+
+        mock_load_tensor.side_effect = load_side_effect
+
+        # Mock get_fp8_constants_for_owlscale
+        fp8_dtype_target = torch.float8_e4m3fn
+        # These values are used by xavier.py but not directly in this test's core logic for input scaling check
         mock_get_constants.return_value = (-448.0, 448.0, 2**-9)
 
-        dummy_weight_tensor = torch.randn(2, 2, dtype=torch.float32) * 10
-        dummy_bias_tensor = torch.randn(2, dtype=torch.float32)
-        mock_load_file.return_value = {
-            "layer.weight": dummy_weight_tensor.clone(),
-            "layer.bias": dummy_bias_tensor.clone(),
-        }
+        # Determine OWLSCALE_COMPUTE_DTYPE and OWLSCALE_SCALE_DTYPE as used in xavier.py
+        # These are globally set in xavier.py when --owlscale is true.
+        # For the test, we use them directly.
+        OWLSCALE_COMPUTE_DTYPE = torch.float64
+        OWLSCALE_SCALE_DTYPE = torch.float64
 
-        weight_hp = dummy_weight_tensor.to(torch.float64)
-        abs_max_weight = torch.max(torch.abs(weight_hp))
-        scale_val_weight = abs_max_weight.clamp(min=1e-12)
-        expected_scaled_weight_for_stochastic_round = (weight_hp / scale_val_weight).to(
-            dummy_weight_tensor.dtype
+        # Calculate the expected input for quantization based on xavier.py's ComfyUI owlscale logic
+        tensor_to_process_weight = dummy_tensors["layer.weight"].to(mock_args.device)
+        original_hp_tensor_weight = tensor_to_process_weight.to(OWLSCALE_COMPUTE_DTYPE)
+        abs_max_weight = torch.max(torch.abs(original_hp_tensor_weight))
+        scale_factor_for_comfyui_val_weight = abs_max_weight.clamp(min=1e-12)
+
+        expected_input_for_quantization_hp_weight = (
+            tensor_to_process_weight.to(scale_factor_for_comfyui_val_weight.dtype)
+            / scale_factor_for_comfyui_val_weight
+        )
+        expected_input_for_quantization_weight = (
+            expected_input_for_quantization_hp_weight.to(tensor_to_process_weight.dtype)
         )
 
-        def mock_round_func(
-            tensor,
-            fp8_dtype,
-            use_complex_method,
-            use_shift_perturb_method,
-            use_owlshift_method,
-            seed,
-            debug_mode,
-        ):
+        # The scale factor that should be saved
+        expected_scale_to_save_weight = scale_factor_for_comfyui_val_weight.to(
+            OWLSCALE_SCALE_DTYPE
+        )
+
+        # Mock stochastic_round_tensor_to_fp8 to simply return the input tensor converted to target dtype
+        # This allows us to check the input to this function accurately.
+        def mock_round_side_effect(tensor, fp8_dtype, *args, **kwargs):
             return tensor.to(fp8_dtype)
 
-        mock_stochastic_round.side_effect = mock_round_func
+        mock_stochastic_round.side_effect = mock_round_side_effect
 
         xavier.main()
 
         mock_get_constants.assert_called_once_with(fp8_dtype_target)
 
         assert mock_stochastic_round.call_count == 1
-        called_args = mock_stochastic_round.call_args[0]
-        # called_kwargs = mock_stochastic_round.call_args[1] # Not used, can be removed for cleanliness
+        # In xavier.py, stochastic_round_tensor_to_fp8 is called with positional args for the tensor and fp8_dtype
+        # and keyword args for the rest.
+        # However, the mock might capture them differently if not explicitly controlled.
+        # Let's check kwargs first as they are more specific.
+        # If the call was made as func(tensor_val, fp8_dtype_val, complex_rounding=False, ...)
+        # then call_args will be ( (tensor_val, fp8_dtype_val), {complex_rounding:False, ...} )
 
-        # Assertions for the arguments passed to the single call of stochastic_round_tensor_to_fp8
-        torch.testing.assert_close(
-            called_args[0],  # The tensor passed for rounding
-            expected_scaled_weight_for_stochastic_round.to(mock_args.device),
+        passed_tensor_to_round = mock_stochastic_round.call_args.kwargs.get(
+            "tensor", None
         )
-        assert called_args[1] == fp8_dtype_target  # The fp8_dtype passed
+        if passed_tensor_to_round is None and mock_stochastic_round.call_args.args:
+            passed_tensor_to_round = mock_stochastic_round.call_args.args[0]
+
+        passed_fp8_dtype = mock_stochastic_round.call_args.kwargs.get("fp8_dtype", None)
+        if passed_fp8_dtype is None and len(mock_stochastic_round.call_args.args) > 1:
+            passed_fp8_dtype = mock_stochastic_round.call_args.args[1]
+
+        torch.testing.assert_close(
+            passed_tensor_to_round,
+            expected_input_for_quantization_weight.to(mock_args.device),
+            msg="Tensor passed to stochastic_round is not correctly pre-scaled for owlscale path.",
+        )
+        assert passed_fp8_dtype == fp8_dtype_target
 
         mock_save_file.assert_called_once()
         saved_state_dict = mock_save_file.call_args[0][0]
 
         assert "layer.weight" in saved_state_dict
+        # The saved tensor should be the result of mock_stochastic_round (which is the pre-scaled tensor cast to fp8_dtype_target in our mock)
+        # We primarily care about the dtype here, as the exact values depend on the mocked stochastic_round_tensor_to_fp8
+        # torch.testing.assert_close(saved_state_dict["layer.weight"].to(expected_input_for_quantization_weight.dtype), expected_input_for_quantization_weight)
         assert saved_state_dict["layer.weight"].dtype == fp8_dtype_target
 
         expected_scale_key_weight = "layer.scale_weight"
         assert expected_scale_key_weight in saved_state_dict
 
-        expected_scale_dtype = torch.float64
-        assert saved_state_dict[expected_scale_key_weight].dtype == expected_scale_dtype
+        assert saved_state_dict[expected_scale_key_weight].dtype == OWLSCALE_SCALE_DTYPE
         torch.testing.assert_close(
-            saved_state_dict[expected_scale_key_weight].to(scale_val_weight.dtype),
-            scale_val_weight,
+            saved_state_dict[expected_scale_key_weight],
+            expected_scale_to_save_weight,
+            msg="Saved scale factor for owlscale is incorrect.",
         )
 
         assert "layer.bias" in saved_state_dict
-        assert saved_state_dict["layer.bias"].dtype == dummy_bias_tensor.dtype
+        assert saved_state_dict["layer.bias"].dtype == dummy_tensors["layer.bias"].dtype
         assert "layer.bias_comfyui_scale" not in saved_state_dict
 
     @patch("os.makedirs")
-    @patch("xavier.load_file")
+    @patch("xavier.get_safetensors_tensor_keys")
+    @patch("xavier.load_tensor_from_safetensors")
     @patch("xavier.save_file")
     @patch("xavier.stochastic_round_tensor_to_fp8")
+    @patch("xavier.generate_comparison_plots")
     @patch("argparse.ArgumentParser.parse_args")
     def test_plot_flag(
         self,
         mock_parse_args,
+        mock_generate_plots,
         mock_stochastic_round,
         mock_save_file,
-        mock_load_file,
+        mock_load_tensor,
+        mock_get_keys,
         injected_mock_os_makedirs,
         mock_args,
     ):
         mock_args.plot = True
         mock_args.plot_dir = "./test_plot_dir"
-        mock_args.plot_max_tensors = 10
-        mock_args.plot_sample_size = 10000
+        mock_args.keys_to_quantize_suffix = [".weight"]
+        mock_args.plot_max_tensors = 1
         mock_parse_args.return_value = mock_args
 
-        mock_load_file.return_value = {"t.weight": torch.randn(2, 2)}
-        mock_stochastic_round.return_value = torch.randn(2, 2).to(torch.float8_e4m3fn)
+        # Mock get_keys and load_tensor
+        dummy_tensors = {
+            "plot_tensor.weight": torch.randn(3, 3, dtype=torch.float32),
+            "another.tensor": torch.randn(2, 2, dtype=torch.float32),
+        }
+        dummy_keys = list(dummy_tensors.keys())
+        mock_get_keys.return_value = dummy_keys
+
+        def load_side_effect(file_path, key, device):
+            return dummy_tensors[key]
+
+        mock_load_tensor.side_effect = load_side_effect
+
+        # Mock stochastic_round to return something processable by the plot logic if it were real
+        mock_stochastic_round.return_value = torch.randn(3, 3).to(torch.float8_e4m3fn)
 
         xavier.main()
 
-        assert mock_stochastic_round.call_count == 1
-        kwargs_passed_to_round = mock_stochastic_round.call_args.kwargs
-        assert (
-            kwargs_passed_to_round["use_complex_method"] == mock_args.complex_rounding
-        )
-        assert kwargs_passed_to_round["use_shift_perturb_method"] == mock_args.shifturb
-        assert kwargs_passed_to_round["use_owlshift_method"] == mock_args.owlshift
-        assert kwargs_passed_to_round["fp8_dtype"] == torch.float8_e4m3fn
-        assert kwargs_passed_to_round["seed"] == mock_args.seed
-        assert kwargs_passed_to_round["debug_mode"] == mock_args.debug
-
+        # Check that os.makedirs was called with the correct test plot directory
         injected_mock_os_makedirs.assert_called_once_with(
-            "./test_plot_dir", exist_ok=True
+            mock_args.plot_dir, exist_ok=True
         )
+
+        # Check that stochastic_round was called for the tensor we expect to plot
+        assert mock_stochastic_round.call_count == 1
+        # Ensure the tensor passed to stochastic_round was the one intended for plotting
+        passed_round_tensor_arg = mock_stochastic_round.call_args.kwargs.get("tensor")
+        assert (
+            passed_round_tensor_arg is not None
+        ), "Tensor argument not found in call to stochastic_round_tensor_to_fp8"
+        torch.testing.assert_close(
+            passed_round_tensor_arg,
+            dummy_tensors["plot_tensor.weight"].to(mock_args.device),
+        )
+
+        # Check that generate_comparison_plots was called
+        mock_generate_plots.assert_called_once()
+        # You could add more specific assertions about the arguments passed to mock_generate_plots if needed
+        # For example, check the tensor_key or parts of the plot_filename:
+        call_kwargs = mock_generate_plots.call_args.kwargs
+        assert call_kwargs["tensor_key"] == "plot_tensor.weight"
+        assert mock_args.plot_dir in call_kwargs["plot_filename"]
 
 
 # Further tests to consider:
