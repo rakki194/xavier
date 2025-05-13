@@ -292,6 +292,20 @@ def main():
                 quantized_state_dict[_scale_key_to_use_] = (
                     scale_factor_for_comfyui_to_save
                 )
+                if main_device.type == "cuda":
+                    # Delete tensors on main_device (CUDA) now that CPU copies are stored
+                    if "original_hp_tensor" in locals():
+                        del original_hp_tensor
+                    if "scale_factor_for_comfyui_val" in locals() and isinstance(
+                        scale_factor_for_comfyui_val, torch.Tensor
+                    ):
+                        del scale_factor_for_comfyui_val
+                    if "input_for_quantization_hp" in locals():
+                        del input_for_quantization_hp
+                    if "input_for_quantization" in locals():
+                        del input_for_quantization
+                    if "quantized_tensor" in locals():
+                        del quantized_tensor
             else:
                 # This print should be conditional on args.debug or be a warning
                 print(
@@ -300,9 +314,7 @@ def main():
 
             quantized_count += 1
             # The following print statements replace the general " Done." that was previously outside this if/elif/else block
-            print(
-                f" Done. New dtype: {quantized_tensor.dtype}", end=""
-            )  # Keep end="" to allow scale factor print on same conceptual line
+            print(f" Done. New dtype: {quantized_state_dict[key].dtype}", end="")
             if scale_factor_for_comfyui_to_save is not None:
                 print(
                     f" Scale factor for {key} (as {_scale_key_to_use_}): {scale_factor_for_comfyui_to_save.item():.5g}",
@@ -331,6 +343,58 @@ def main():
             quantized_state_dict[key] = quantized_tensor_fp8.to(
                 original_tensor_device
             )  # Store on CPU
+            if main_device.type == "cuda":
+                # Delete tensor on main_device (CUDA) now that CPU copy is stored
+                if "quantized_tensor_fp8" in locals():
+                    del quantized_tensor_fp8
+
+            quantized_count += 1
+            print(" Done.")
+
+            if (
+                args.plot
+                and original_tensor_for_plot_and_type is not None
+                and plots_generated_count < args.plot_max_tensors
+                and key in quantized_state_dict
+            ):
+                if tensor_to_process.is_floating_point() and any(
+                    key.endswith(suffix) for suffix in args.keys_to_quantize_suffix
+                ):
+                    print(f"  Generating plot for {key}...")
+                    # Prepare arguments for generate_comparison_plots
+                    original_tensor_cpu_for_plot = (
+                        original_tensor_for_plot_and_type  # Already on CPU
+                    )
+                    quantized_tensor_cpu_for_plot = quantized_state_dict[key].cpu()
+                    dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
+                        original_tensor_cpu_for_plot.dtype
+                    )
+
+                    # Construct a safe filename for the plot
+                    safe_tensor_key_for_filename = key.replace("/", "_").replace(
+                        ".", "_"
+                    )
+                    plot_file_path = os.path.join(
+                        args.plot_dir, f"{safe_tensor_key_for_filename}_comparison.png"
+                    )
+
+                    original_dtype_name = str(original_tensor_cpu_for_plot.dtype)
+                    fp8_dtype_name = str(
+                        fp8_dtype
+                    )  # fp8_dtype is like torch.float8_e4m3fn
+
+                    generate_comparison_plots(
+                        original_tensor_cpu=original_tensor_cpu_for_plot,
+                        quantized_fp8_tensor_cpu=quantized_tensor_cpu_for_plot,
+                        dequantized_tensor_cpu=dequantized_tensor_cpu_for_plot,
+                        tensor_key=key,
+                        plot_filename=plot_file_path,
+                        original_dtype_str=original_dtype_name,
+                        fp8_dtype_str=fp8_dtype_name,
+                        sample_size=args.plot_sample_size,
+                    )
+                    plots_generated_count += 1
+
         else:
             print(" (Skipping quantization, copying as is)...", end="")
             quantized_state_dict[key] = tensor.to(original_tensor_device)  # Copy to CPU
@@ -378,6 +442,9 @@ def main():
                 plots_generated_count += 1
 
         if main_device.type == "cuda":
+            # Explicitly delete tensor_to_process if it was on CUDA and is no longer needed
+            if "tensor_to_process" in locals():
+                del tensor_to_process
             torch.cuda.empty_cache()
 
     print(
