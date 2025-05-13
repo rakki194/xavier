@@ -14,7 +14,7 @@ This document provides an overview of `torchao` with a focus on its FP8 quantiza
 
 2. **FP8 Support (`torchao.float8` and `torchao.dtypes`):**
     * `torchao` provides extensive support for FP8 (E4M3 and E5M2) data types.
-    * **Scaling:** Dynamic scaling is a core part of its FP8 implementation. Scales are typically derived from the `amax` (absolute maximum) of the tensor, similar to the "owlscale" method in `xavier.py`.
+    * **Scaling:** Dynamic scaling is a core part of its FP8 implementation. Scales are typically derived from the `amax` (absolute maximum) of the tensor, similar to the "comfyscale" method in `xavier.py`.
         * `torchao.float8.float8_utils.tensor_to_scale(...)`: Computes scaling factor.
         * `torchao.float8.float8_scaling_utils.hp_tensor_to_float8_dynamic(...)`: Converts a high-precision tensor to a `Float8Tensor` with dynamic scaling.
     * **Quantization Primitives:**
@@ -75,7 +75,7 @@ Here's a suggested approach to integrate `torchao` into `xavier.py`:
   * `--quant_method` (e.g., choices: `torchao_fp8_weight_only`, `torchao_fp8_dynamic_act_weight`).
   * Keep `--fp8_type` (`e4m3`, `e5m2`) as this will be passed to `torchao` configs.
   * The existing `--complex_rounding`, `--shifturb`, `--owlshift` might become irrelevant if using `torchao`'s core quantization, unless you opt for Option A above for stochastic rounding.
-  * `--owlscale`'s direct functionality will be replaced by `torchao`'s internal scaling. However, the *concept* of per-tensor max-abs scaling is what `torchao` uses by default (for per-tensor granularity).
+  * `--comfyscale`'s direct functionality will be replaced by `torchao`'s internal scaling. However, the *concept* of per-tensor max-abs scaling is what `torchao` uses by default (for per-tensor granularity).
 * **Deprecate or adapt existing rounding/scaling flags** when a `torchao` method is chosen.
 
 ### 2. Model Loading and Preparation
@@ -108,7 +108,7 @@ Here's a suggested approach to integrate `torchao` into `xavier.py`:
 
 ### 3. Quantization Logic (Main Loop)
 
-* **Replace `stochastic_round_tensor_to_fp8` and Owlscale logic.**
+* **Replace `stochastic_round_tensor_to_fp8` and comfyscale logic.**
 
 * **If using Solution 1 (Per-Tensor with `to_affine_quantized_floatx`):**
 
@@ -202,7 +202,7 @@ Here's a suggested approach to integrate `torchao` into `xavier.py`:
 
 * The `AffineQuantizedTensor` (if you get one directly) or the underlying data and scale (if extracted) needs to be saved.
 * **Scale Factor:** `torchao` provides the scale. Your current logic for deriving `_scale_key_to_use_` and saving `scale_factor_for_comfyui_to_save` can be adapted. The scale from `torchao` (e.g., `aq_tensor.tensor_impl.scale`) should be used.
-* **FP8 Marker:** The `scaled_fp8` marker key should still be added if `owlscale`-like behavior (where scales are saved separately) is achieved. `torchao`'s `Float8WeightOnlyConfig` and `Float8DynamicActivationFloat8WeightConfig` manage scales alongside the quantized weights, so the concept aligns.
+* **FP8 Marker:** The `scaled_fp8` marker key should still be added if `comfyscale`-like behavior (where scales are saved separately) is achieved. `torchao`'s `Float8WeightOnlyConfig` and `Float8DynamicActivationFloat8WeightConfig` manage scales alongside the quantized weights, so the concept aligns.
 
 ### 5. Plotting
 

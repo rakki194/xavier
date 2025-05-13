@@ -41,7 +41,7 @@ rounding_methods["--owlshift"]="owlshift"
 # Value is the name for file/directory naming
 declare -A scaling_options
 scaling_options[""]="noscale"
-scaling_options["--owlscale"]="owlscale"
+scaling_options["--comfyscale"]="comfyscale"
 
 
 # --- Script Logic ---

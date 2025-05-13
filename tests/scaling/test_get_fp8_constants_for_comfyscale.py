@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from scaling.get_fp8_constants_for_owlscale import get_fp8_constants_for_owlscale
+from scaling.get_fp8_constants_for_comfyscale import get_fp8_constants_for_comfyscale
 
 FP8_E4M3 = torch.float8_e4m3fn
 FP8_E5M2 = torch.float8_e5m2
@@ -14,7 +14,7 @@ def test_get_fp8_constants_e4m3fn():
     expected_max = float(finfo.max)
     expected_min_pos = 2**-9  # As per function's hardcoding for E4M3FN
 
-    actual_min, actual_max, actual_min_pos = get_fp8_constants_for_owlscale(fp8_dtype)
+    actual_min, actual_max, actual_min_pos = get_fp8_constants_for_comfyscale(fp8_dtype)
 
     assert actual_min == expected_min
     assert actual_max == expected_max
@@ -28,7 +28,7 @@ def test_get_fp8_constants_e5m2():
     expected_max = float(finfo.max)
     expected_min_pos = 2**-16  # As per function's hardcoding for E5M2
 
-    actual_min, actual_max, actual_min_pos = get_fp8_constants_for_owlscale(fp8_dtype)
+    actual_min, actual_max, actual_min_pos = get_fp8_constants_for_comfyscale(fp8_dtype)
 
     assert actual_min == expected_min
     assert actual_max == expected_max

@@ -13,7 +13,7 @@ The script supports multiple FP8 formats and, for its native methods, several di
   * **Native Methods**: Employs different stochastic rounding techniques to probabilistically round values.
   * **TorchAO Integration**: Leverages the `torchao` library for quantization, offering access to potentially more optimized routines and `torch.compile` compatibility.
 * **Stochastic Rounding (Native Methods)**: See details below for specific algorithms.
-* **Per-Tensor Max-Absolute Scaling (Owlscale - Native Method)**:
+* **Per-Tensor Max-Absolute Scaling (comfyscale - Native Method)**:
   * A pre-processing step that scales each tensor to map its maximum absolute value into the representable range of the target FP8 format.
   * When used with native methods, it saves dequantization scales alongside the quantized tensors, compatible with ComfyUI-style scaled FP8 loading.
 * **TorchAO Scaling**: When using `torchao`, scaling is handled internally by the library, typically based on `amax` (absolute maximum) of the tensor or tensor groups.
@@ -69,10 +69,10 @@ When a `--quant_method` starting with `torchao_` is selected (e.g., `torchao_fp8
 * **Mechanism**: `torchao` operates on `nn.Module` instances. `xavier.py` wraps individual tensors (typically weights from linear layers) in a temporary `DummyModule` to make them compatible with `torchao`'s `quantize_` API.
 * **Scaling**:
   * **`_aoscale` variants (e.g., `torchao_fp8_weight_only_aoscale`)**: `torchao` handles scaling internally. For FP8, this is generally dynamic scaling based on `amax` (absolute maximum value of the tensor or sub-groups of the tensor). The scale is calculated typically as `scale_ao = torch.finfo(fp8_dtype).max / amax(original_tensor)`. The quantized tensor `fp8_tensor_ao` then represents `original_tensor / scale_ao`. Both `fp8_tensor_ao` and `scale_ao` are saved. This is TorchAO's native scaling convention.
-  * **`_comfyscale` variants (e.g., `torchao_fp8_weight_only_comfyscale`)**: After `torchao` performs its quantization (obtaining `fp8_tensor_ao` and `scale_ao`), `xavier.py` adapts these to be compatible with ComfyUI's "owlscale" convention.
+  * **`_comfyscale` variants (e.g., `torchao_fp8_weight_only_comfyscale`)**: After `torchao` performs its quantization (obtaining `fp8_tensor_ao` and `scale_ao`), `xavier.py` adapts these to be compatible with ComfyUI's "comfyscale" convention.
     * The ComfyUI-compatible scale is calculated as `scale_comfy = scale_ao * torch.finfo(fp8_dtype).max`. This `scale_comfy` is equivalent to `amax(original_tensor)`.
     * The ComfyUI-compatible FP8 tensor is calculated as `fp8_tensor_comfy = to_fp8_saturated(fp8_tensor_ao.float() / torch.finfo(fp8_dtype).max, target_dtype=fp8_dtype)`. This `fp8_tensor_comfy` now represents `original_tensor / scale_comfy` (i.e., values normalized to `[-1, 1]` before FP8 conversion).
-    * Both `fp8_tensor_comfy` and `scale_comfy` are saved. This ensures that the saved FP8 tensor and scale have the same semantic meaning as those produced by the native `--owlscale` method.
+    * Both `fp8_tensor_comfy` and `scale_comfy` are saved. This ensures that the saved FP8 tensor and scale have the same semantic meaning as those produced by the native `--comfyscale` method.
 * **Rounding**: `torchao` typically uses deterministic rounding (e.g., Round-to-Nearest-Even) after scaling. For `_comfyscale` variants, `torchao.float8.float8_utils.to_fp8_saturated` is used for the final conversion, which also implies deterministic rounding.
 * **Configurations**: `xavier.py` uses `torchao`'s `Float8WeightOnlyConfig` or `Float8DynamicActivationFloat8WeightConfig` to control the quantization process.
   * `Float8WeightOnlyConfig`: Quantizes only weights to FP8. Activations remain in higher precision. Matmul might dequantize weights on the fly unless compiled for FP8 kernels.
@@ -96,9 +96,9 @@ python xavier.py <input.safetensors> <output.safetensors> [OPTIONS]
   * Specifies the quantization method.
   * `native` (default): Uses `xavier.py`'s original stochastic rounding methods.
   * `torchao_fp8_weight_only_aoscale`: Uses `torchao` to quantize weights only to FP8, saving with TorchAO's native scaling.
-  * `torchao_fp8_weight_only_comfyscale`: Uses `torchao` to quantize weights only to FP8, adapting the output to be ComfyUI/`owlscale` compatible.
+  * `torchao_fp8_weight_only_comfyscale`: Uses `torchao` to quantize weights only to FP8, adapting the output to be ComfyUI/`comfyscale` compatible.
   * `torchao_fp8_dynamic_act_weight_aoscale`: Uses `torchao` for dynamic activation and weight FP8 quantization, saving with TorchAO's native scaling.
-  * `torchao_fp8_dynamic_act_weight_comfyscale`: Uses `torchao` for dynamic activation and weight FP8 quantization, adapting the output to be ComfyUI/`owlscale` compatible.
+  * `torchao_fp8_dynamic_act_weight_comfyscale`: Uses `torchao` for dynamic activation and weight FP8 quantization, adapting the output to be ComfyUI/`comfyscale` compatible.
 * `--fp8_type <e4m3|e5m2>`
   * Specifies the target FP8 data type.
   * `e4m3` (default): Uses `torch.float8_e4m3fn`.
@@ -121,7 +121,7 @@ python xavier.py <input.safetensors> <output.safetensors> [OPTIONS]
   * Activates the shift-and-perturb (additive noise) stochastic rounding method.
 * `--owlshift`
   * Activates the Owlshift method (manual stochastic mantissa rounding).
-* `--owlscale`
+* `--comfyscale`
   * Applies per-tensor max-abs scaling (ComfyUI-compatible) before native stochastic rounding.
   * If used, dequantization scale tensors are saved (e.g., `layer.weight` -> `layer.scale_weight`).
   * Bias terms are typically excluded from this specific scaling path.
@@ -148,12 +148,12 @@ python xavier.py <input.safetensors> <output.safetensors> [OPTIONS]
 
 ## Combining Flags
 
-* **Quantization Method**: The `--quant_method` flag dictates the primary quantization engine. If a `torchao_` method is chosen, native stochastic rounding flags (`--complex_rounding`, `--shifturb`, `--owlshift`) and `--owlscale` are ignored, as `torchao` handles its own rounding (typically deterministic) and scaling.
+* **Quantization Method**: The `--quant_method` flag dictates the primary quantization engine. If a `torchao_` method is chosen, native stochastic rounding flags (`--complex_rounding`, `--shifturb`, `--owlshift`) and `--comfyscale` are ignored, as `torchao` handles its own rounding (typically deterministic) and scaling.
 * **Native Rounding Methods**: If `--quant_method native` is used, `--complex_rounding`, `--shifturb`, and `--owlshift` are mutually exclusive regarding the core rounding logic. The script has an internal order of preference: Owlshift > Shifturb > Complex Rounding > Default.
-* **Native Scaling**: If `--quant_method native` is used, `--owlscale` can be combined with any of the native rounding methods. The scaling is applied *before* the chosen rounding method operates on the scaled tensor.
+* **Native Scaling**: If `--quant_method native` is used, `--comfyscale` can be combined with any of the native rounding methods. The scaling is applied *before* the chosen rounding method operates on the scaled tensor.
 * **TorchAO Scaling Variants**:
   * `_aoscale` methods save tensors using TorchAO's direct output scaling.
-  * `_comfyscale` methods adapt TorchAO's output to match the `owlscale` convention (FP8 tensor normalized to `[-1,1]`, scale is `amax`). This ensures compatibility with systems expecting `owlscale` formatted FP8 tensors.
+  * `_comfyscale` methods adapt TorchAO's output to match the `comfyscale` convention (FP8 tensor normalized to `[-1,1]`, scale is `amax`). This ensures compatibility with systems expecting `comfyscale` formatted FP8 tensors.
 
 ## Plotting
 
@@ -166,23 +166,23 @@ These plots are helpful for qualitatively assessing the impact of the quantizati
 
 ## ComfyUI-Style Scaled FP8
 
-* **Native Method with `--owlscale`**: Implements per-tensor scaling compatible with ComfyUI. Scales are saved separately (e.g., `layer.weight` and `layer.scale_weight`).
+* **Native Method with `--comfyscale`**: Implements per-tensor scaling compatible with ComfyUI. Scales are saved separately (e.g., `layer.weight` and `layer.scale_weight`).
 * **TorchAO Methods**:
   * `torchao_..._aoscale`: Saves scales according to TorchAO's native convention.
-  * `torchao_..._comfyscale`: Saves scales adapted to be equivalent to the `owlscale` convention (`scale = amax(original_tensor)`).
-  In all `torchao` cases and native `--owlscale`, scales are saved with a `scale_weight` suffix if the original key was `*.weight`.
+  * `torchao_..._comfyscale`: Saves scales adapted to be equivalent to the `comfyscale` convention (`scale = amax(original_tensor)`).
+  In all `torchao` cases and native `--comfyscale`, scales are saved with a `scale_weight` suffix if the original key was `*.weight`.
 
-In both cases (native `--owlscale` or any `torchao_` method), a marker tensor `scaled_fp8` (with the target `fp8_dtype`) is added to the state dictionary to indicate this scaling convention.
+In both cases (native `--comfyscale` or any `torchao_` method), a marker tensor `scaled_fp8` (with the target `fp8_dtype`) is added to the state dictionary to indicate this scaling convention.
 
 ## Examples
 
-### Native Quantization (Owlscale + Owlshift)
+### Native Quantization (comfyscale + Owlshift)
 
 ```bash
 python xavier.py model_fp32.safetensors model_fp8_native_owl.safetensors \
     --quant_method native \
     --fp8_type e4m3 \
-    --owlscale \
+    --comfyscale \
     --owlshift \
     --keys_to_quantize_suffix .weight \
     --plot \
@@ -193,7 +193,7 @@ This command will:
 
 1. Load `model_fp32.safetensors`.
 2. Use the `native` quantization method.
-3. Apply per-tensor max-absolute scaling (`--owlscale`) to tensors ending in `.weight`.
+3. Apply per-tensor max-absolute scaling (`--comfyscale`) to tensors ending in `.weight`.
 4. Quantize these scaled tensors to `torch.float8_e4m3fn` (`--fp8_type e4m3`) using the Owlshift stochastic rounding method (`--owlshift`).
 5. Save the resulting model (with quantized tensors and scales) to `model_fp8_native_owl.safetensors`.
 6. Generate comparison plots.
@@ -233,7 +233,7 @@ This command will:
 
 1. Load `model_fp32.safetensors`.
 2. Use `torchao` for weight-only FP8 quantization.
-3. The output FP8 tensor and scale will be adapted to match the ComfyUI/`owlscale` convention.
+3. The output FP8 tensor and scale will be adapted to match the ComfyUI/`comfyscale` convention.
 4. Target `torch.float8_e4m3fn`.
 5. Quantize tensors whose keys end in `.weight`.
 6. Save to `model_fp8_torchao_wo_comfyscale.safetensors`.
@@ -268,7 +268,7 @@ python xavier.py model_fp32.safetensors model_fp8_torchao_dyn_comfyscale.safeten
 This command will:
 
 1. Use `torchao` for dynamic activation and weight FP8 quantization.
-2. The output FP8 tensor and scale will be adapted to match the ComfyUI/`owlscale` convention.
+2. The output FP8 tensor and scale will be adapted to match the ComfyUI/`comfyscale` convention.
 3. Target `torch.float8_e5m2` for both activations and weights.
 4. Save to `model_fp8_torchao_dyn_comfyscale.safetensors`.
 

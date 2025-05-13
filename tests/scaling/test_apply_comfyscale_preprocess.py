@@ -1,10 +1,10 @@
 import torch
 import pytest
 
-from scaling.apply_owlscale_preprocess import apply_owlscale_preprocess
+from scaling.apply_comfyscale_preprocess import apply_comfyscale_preprocess
 
 # Define some FP8 constants for testing (can be simplified versions)
-# These would typically come from get_fp8_constants_for_owlscale or be specific to a test case
+# These would typically come from get_fp8_constants_for_comfyscale or be specific to a test case
 FP8_E4M3_MIN_VAL = -448.0
 FP8_E4M3_MAX_VAL = 448.0
 FP8_E4M3_MIN_POS_VAL = 2**-9  # Smallest subnormal for E4M3FN, as an example
@@ -23,11 +23,11 @@ FP8_DTYPES = [torch.float8_e4m3fn, torch.float8_e5m2]
 
 @pytest.mark.parametrize("orig_dtype", ORIG_DTYPES)
 @pytest.mark.parametrize("compute_dtype_to_use", COMPUTE_DTYPES)
-class TestApplyOwlscalePreprocess:
+class TestApplycomfyscalePreprocess:
 
     def test_empty_tensor(self, orig_dtype, compute_dtype_to_use):
         tensor = torch.empty((0,), dtype=orig_dtype)
-        processed_tensor, dequant_scale = apply_owlscale_preprocess(
+        processed_tensor, dequant_scale = apply_comfyscale_preprocess(
             tensor,
             target_fp8_dtype=torch.float8_e4m3fn,  # Dummy, not used for calcs
             fp8_min_val=FP8_E4M3_MIN_VAL,
@@ -42,7 +42,7 @@ class TestApplyOwlscalePreprocess:
 
     def test_near_zero_abs_max(self, orig_dtype, compute_dtype_to_use):
         tensor = torch.tensor([1e-15, -1e-14, 0.0], dtype=orig_dtype)
-        processed_tensor, dequant_scale = apply_owlscale_preprocess(
+        processed_tensor, dequant_scale = apply_comfyscale_preprocess(
             tensor,
             target_fp8_dtype=torch.float8_e4m3fn,
             fp8_min_val=FP8_E4M3_MIN_VAL,
@@ -74,7 +74,7 @@ class TestApplyOwlscalePreprocess:
         tensor = torch.tensor([-600.0, -10.0, 0.0, 20.0, 500.0], dtype=orig_dtype)
         calc_tensor = tensor.to(compute_dtype_to_use)
 
-        processed_tensor, dequant_scale = apply_owlscale_preprocess(
+        processed_tensor, dequant_scale = apply_comfyscale_preprocess(
             tensor,
             target_fp8_dtype=torch.float8_e4m3fn,  # Dummy
             fp8_min_val=fp8_min,
@@ -132,7 +132,7 @@ class TestApplyOwlscalePreprocess:
         )
         calc_tensor = tensor.to(compute_dtype_to_use)
 
-        processed_tensor, dequant_scale = apply_owlscale_preprocess(
+        processed_tensor, dequant_scale = apply_comfyscale_preprocess(
             tensor,
             target_fp8_dtype=torch.float8_e4m3fn,  # Dummy
             fp8_min_val=fp8_min,
@@ -171,7 +171,7 @@ class TestApplyOwlscalePreprocess:
 
     def test_debug_mode(self, orig_dtype, compute_dtype_to_use, capsys):
         tensor = torch.tensor([1.0, 2.0], dtype=orig_dtype)
-        apply_owlscale_preprocess(
+        apply_comfyscale_preprocess(
             tensor,
             target_fp8_dtype=torch.float8_e4m3fn,
             fp8_min_val=FP8_E4M3_MIN_VAL,
@@ -181,7 +181,7 @@ class TestApplyOwlscalePreprocess:
             debug_mode=True,
         )
         captured = capsys.readouterr()
-        assert "DEBUG apply_owlscale_preprocess" in captured.out
+        assert "DEBUG apply_comfyscale_preprocess" in captured.out
         assert "Initial tensor stats" in captured.out
         assert "Calculated abs_max" in captured.out
         assert "Clamped_tensor stats" in captured.out

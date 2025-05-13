@@ -3,7 +3,7 @@ import argparse
 from safetensors.torch import save_file
 import os
 from quantization import stochastic_round_tensor_to_fp8
-from scaling import get_fp8_constants_for_owlscale
+from scaling import get_fp8_constants_for_comfyscale
 from plotting_utils import MATPLOTLIB_AVAILABLE, generate_comparison_plots
 from safetensors_utils import load_tensor_from_safetensors, get_safetensors_tensor_keys
 
@@ -20,6 +20,9 @@ try:
     )  # Using PerTensor as a default for dynamic
     from torchao.dtypes import AffineQuantizedTensor
     from torchao.float8.float8_utils import to_fp8_saturated
+    from torchao.float8.float8_linear import (
+        Float8Linear,
+    )  # Added import for dynamic quant handling
 
     # For plotting dequantization if using lower-level primitives:
     # from torchao.quantization.quant_primitives import dequantize_affine_floatx
@@ -43,12 +46,12 @@ to introduce a controlled amount of noise, which can sometimes help preserve mod
 by ensuring that, on average, the rounding errors do not systematically bias values up or down.
 """
 
-# Global dtypes for Owlscale - these are set in main() if --owlscale is used.
-OWLSCALE_COMPUTE_DTYPE = None
-OWLSCALE_SCALE_DTYPE = None
-OWLSCALE_FP8_MIN = None
-OWLSCALE_FP8_MAX = None
-OWLSCALE_FP8_MIN_POS = None
+# Global dtypes for comfyscale - these are set in main() if --comfyscale is used.
+comfyscale_COMPUTE_DTYPE = None
+comfyscale_SCALE_DTYPE = None
+comfyscale_FP8_MIN = None
+comfyscale_FP8_MAX = None
+comfyscale_FP8_MIN_POS = None
 
 
 # Dummy Module for TorchAO
@@ -103,7 +106,7 @@ def main():
         ],
         help="Quantization method to use. 'native' uses xavier.py's original methods. "
         "'torchao_..._aoscale' uses TorchAO with its native scaling. "
-        "'torchao_..._comfyscale' uses TorchAO with ComfyUI/owlscale compatible scaling.",
+        "'torchao_..._comfyscale' uses TorchAO with ComfyUI/comfyscale compatible scaling.",
     )
     # FP8 specific arguments
     parser.add_argument(
@@ -139,7 +142,7 @@ def main():
         help="Use owlshift (manual stochastic mantissa rounding) FP8 method (native method only).",
     )
     parser.add_argument(
-        "--owlscale",
+        "--comfyscale",
         action="store_true",
         help="Apply per-tensor max-abs scaling before FP8 stochastic rounding (native method only, TorchAO handles its own scaling).",
     )
@@ -199,9 +202,9 @@ def main():
         return
 
     if is_torchao_method:
-        if args.complex_rounding or args.shifturb or args.owlshift or args.owlscale:
+        if args.complex_rounding or args.shifturb or args.owlshift or args.comfyscale:
             print(
-                "Warning: Native quantization flags (--complex_rounding, --shifturb, --owlshift, --owlscale) are ignored when a TorchAO method is selected."
+                "Warning: Native quantization flags (--complex_rounding, --shifturb, --owlshift, --comfyscale) are ignored when a TorchAO method is selected."
             )
 
     if not os.path.exists(args.input_file):
@@ -247,17 +250,17 @@ def main():
             print(
                 f"Using owlshift (manual stochastic mantissa rounding) with seed: {args.seed}."
             )
-        if args.owlscale:
-            print(f"Using owlscale (per-tensor max-abs scaling pre-quantization).")
-            global OWLSCALE_COMPUTE_DTYPE, OWLSCALE_SCALE_DTYPE
-            global OWLSCALE_FP8_MIN, OWLSCALE_FP8_MAX, OWLSCALE_FP8_MIN_POS
-            OWLSCALE_COMPUTE_DTYPE = torch.float64
-            OWLSCALE_SCALE_DTYPE = torch.float64
-            OWLSCALE_FP8_MIN, OWLSCALE_FP8_MAX, OWLSCALE_FP8_MIN_POS = (
-                get_fp8_constants_for_owlscale(fp8_dtype)
+        if args.comfyscale:
+            print(f"Using comfyscale (per-tensor max-abs scaling pre-quantization).")
+            global comfyscale_COMPUTE_DTYPE, comfyscale_SCALE_DTYPE
+            global comfyscale_FP8_MIN, comfyscale_FP8_MAX, comfyscale_FP8_MIN_POS
+            comfyscale_COMPUTE_DTYPE = torch.float64
+            comfyscale_SCALE_DTYPE = torch.float64
+            comfyscale_FP8_MIN, comfyscale_FP8_MAX, comfyscale_FP8_MIN_POS = (
+                get_fp8_constants_for_comfyscale(fp8_dtype)
             )
             print(
-                f"  Owlscale FP8 Target: {fp8_dtype}, Range: [{OWLSCALE_FP8_MIN}, {OWLSCALE_FP8_MAX}], Min Pos: {OWLSCALE_FP8_MIN_POS:.2e}"
+                f"  comfyscale FP8 Target: {fp8_dtype}, Range: [{comfyscale_FP8_MIN}, {comfyscale_FP8_MAX}], Min Pos: {comfyscale_FP8_MIN_POS:.2e}"
             )
     else:  # TorchAO specific messages
         print(
@@ -295,7 +298,7 @@ def main():
 
         if args.debug:
             print(
-                f"DEBUG main loop for tensor {key}: quant_method={args.quant_method}, complex_flag={args.complex_rounding}, shifturb_flag={args.shifturb}, owlshift_flag={args.owlshift}, owlscale_flag={args.owlscale}"
+                f"DEBUG main loop for tensor {key}: quant_method={args.quant_method}, complex_flag={args.complex_rounding}, shifturb_flag={args.shifturb}, owlshift_flag={args.owlshift}, comfyscale_flag={args.comfyscale}"
             )
             if tensor.numel() > 0:
                 print(
@@ -361,45 +364,63 @@ def main():
                 if torchao_config:
                     quantize_(dummy_model, torchao_config)
 
-                    quantized_weight_from_module = dummy_model.linear.weight
-
-                    # Check if the weight was indeed replaced by an AffineQuantizedTensor or part of a Float8Linear module
+                    quantized_layer_or_param = dummy_model.linear
                     final_quantized_tensor_data_ao = None
                     final_scale_ao = None
 
-                    if isinstance(quantized_weight_from_module, AffineQuantizedTensor):
+                    # Order of checks is important, esp. for Float8Linear
+                    if isinstance(quantized_layer_or_param, Float8Linear):
+                        if (
+                            hasattr(quantized_layer_or_param, "weight")
+                            and quantized_layer_or_param.weight.dtype == fp8_dtype
+                            and hasattr(quantized_layer_or_param, "weight_scale")
+                        ):
+                            final_quantized_tensor_data_ao = (
+                                quantized_layer_or_param.weight
+                            )
+                            final_scale_ao = quantized_layer_or_param.weight_scale
+                        elif isinstance(
+                            quantized_layer_or_param.weight, AffineQuantizedTensor
+                        ):  # If Float8Linear wraps an AQT for its weight
+                            final_quantized_tensor_data_ao = (
+                                quantized_layer_or_param.weight.tensor_impl.data
+                            )
+                            final_scale_ao = (
+                                quantized_layer_or_param.weight.tensor_impl.scale
+                            )
+                        # Add other specific extraction logic for Float8Linear variants if necessary
+
+                    elif isinstance(
+                        quantized_layer_or_param.weight, AffineQuantizedTensor
+                    ):
+                        # This case handles when the nn.Parameter itself is replaced by an AQT (e.g., weight_only)
                         final_quantized_tensor_data_ao = (
-                            quantized_weight_from_module.tensor_impl.data
-                        )
-                        final_scale_ao = quantized_weight_from_module.tensor_impl.scale
-                    elif hasattr(dummy_model.linear, "_weight_aqt") and isinstance(
-                        dummy_model.linear._weight_aqt, AffineQuantizedTensor
-                    ):  # For Float8Linear case
-                        final_quantized_tensor_data_ao = (
-                            dummy_model.linear._weight_aqt.tensor_impl.data
+                            quantized_layer_or_param.weight.tensor_impl.data
                         )
                         final_scale_ao = (
-                            dummy_model.linear._weight_aqt.tensor_impl.scale
+                            quantized_layer_or_param.weight.tensor_impl.scale
+                        )
+                    elif hasattr(
+                        quantized_layer_or_param, "_weight_aqt"
+                    ) and isinstance(
+                        quantized_layer_or_param._weight_aqt, AffineQuantizedTensor
+                    ):  # Another pattern for AQT within a (potentially custom) layer
+                        final_quantized_tensor_data_ao = (
+                            quantized_layer_or_param._weight_aqt.tensor_impl.data
+                        )
+                        final_scale_ao = (
+                            quantized_layer_or_param._weight_aqt.tensor_impl.scale
                         )
                     elif (
-                        hasattr(dummy_model.linear, "weight")
-                        and dummy_model.linear.weight.dtype == fp8_dtype
-                        and hasattr(quantized_weight_from_module, "_scale")
-                    ):  # Check for Float8Tensor's scale
-                        final_quantized_tensor_data_ao = quantized_weight_from_module
-                        final_scale_ao = quantized_weight_from_module._scale
+                        hasattr(quantized_layer_or_param, "weight")
+                        and quantized_layer_or_param.weight.dtype == fp8_dtype
+                        and hasattr(quantized_layer_or_param.weight, "_scale")
+                    ):  # Fallback for direct Float8Tensor with _scale as weight param
+                        final_quantized_tensor_data_ao = quantized_layer_or_param.weight
+                        final_scale_ao = quantized_layer_or_param.weight._scale
                     else:
-                        print(
-                            f" Warning: TorchAO quantized {key} to {fp8_dtype} but the expected quantized tensor (AffineQuantizedTensor or Float8Tensor with scale) was not found. Copying original.",
-                            end="",
-                        )
-                        quantized_state_dict[key] = tensor.to(original_tensor_device)
-                        print(" Done.")
-                        # Continue to next tensor or clean up dummy_model
-                        del dummy_model
-                        if "torchao_config" in locals():
-                            del torchao_config
-                        continue
+                        # This will lead to the warning and copying original tensor in the next block
+                        pass
 
                     if (
                         final_quantized_tensor_data_ao is not None
@@ -408,30 +429,68 @@ def main():
                         processed_fp8_tensor = None
                         processed_scale_factor = None
 
+                        # Detach the tensor data to prevent issues with underlying implementations
+                        cloned_final_quantized_tensor_data_ao = (
+                            final_quantized_tensor_data_ao.clone().detach()
+                        )
+
                         if "comfyscale" in args.quant_method:
                             print(f" (Adapting to ComfyUI scale convention)...", end="")
-                            fp8_qmax = torch.finfo(fp8_dtype).max
 
-                            scale_ao_compute = final_scale_ao.to(
-                                dtype=torch.float32, device=main_device
+                            # Dequantize using TorchAO's data and scale to get the effective high-precision tensor
+                            # Ensure types are appropriate for multiplication (e.g., float32)
+
+                            # Potentially unwrap Float8Tensor to get to the raw underlying data tensor
+                            data_to_cast = cloned_final_quantized_tensor_data_ao
+                            if hasattr(cloned_final_quantized_tensor_data_ao, "_data"):
+                                data_to_cast = (
+                                    cloned_final_quantized_tensor_data_ao._data
+                                )
+
+                            if data_to_cast.dtype != torch.float32:
+                                data_f32 = data_to_cast.to(torch.float32)
+                            else:
+                                data_f32 = data_to_cast
+
+                            scale_f32 = final_scale_ao.to(
+                                torch.float32
+                            )  # Scales should typically be plain tensors
+                            effective_hp_tensor = data_f32 * scale_f32
+
+                            # Calculate the ComfyUI-style scale (absmax of the effective HP tensor)
+                            # This mimics the original comfyscale behavior where scale is amax of original tensor
+                            comfy_style_scale = torch.max(
+                                torch.abs(effective_hp_tensor)
                             )
-                            fp8_tensor_ao_compute = final_quantized_tensor_data_ao.to(
-                                dtype=torch.float32, device=main_device
+                            comfy_style_scale = comfy_style_scale.clamp(
+                                min=torch.finfo(effective_hp_tensor.dtype).tiny
+                            )  # Match comfyscale clamp
+
+                            # Normalize the effective HP tensor by the new ComfyUI-style scale
+                            # The input to to_fp8_saturated should be in the [-1, 1] range (approx) for best results
+                            normalized_hp_tensor_for_comfy = (
+                                effective_hp_tensor / comfy_style_scale
                             )
 
-                            comfy_scale = scale_ao_compute * fp8_qmax
-                            temp_dequant_for_comfy = fp8_tensor_ao_compute / fp8_qmax
-
-                            comfy_fp8_tensor = to_fp8_saturated(
-                                temp_dequant_for_comfy, target_dtype=fp8_dtype
+                            # Re-quantize this normalized tensor to FP8
+                            processed_fp8_tensor = to_fp8_saturated(
+                                normalized_hp_tensor_for_comfy, target_dtype=fp8_dtype
                             )
 
-                            processed_fp8_tensor = comfy_fp8_tensor
-                            processed_scale_factor = comfy_scale
+                            # The scale factor to save is the ComfyUI-style scale
+                            # Save it with the original tensor's dtype for consistency with native comfyscale, or float32
+                            # original_tensor_for_plot_and_type is available here if needed for dtype
+                            processed_scale_factor = comfy_style_scale.to(
+                                dtype=(
+                                    original_tensor_for_plot_and_type.dtype
+                                    if original_tensor_for_plot_and_type is not None
+                                    else torch.float32
+                                )
+                            )
 
                         elif "aoscale" in args.quant_method:
                             print(f" (Using native TorchAO scale)...", end="")
-                            processed_fp8_tensor = final_quantized_tensor_data_ao
+                            processed_fp8_tensor = cloned_final_quantized_tensor_data_ao  # Use the cloned, detached data
                             processed_scale_factor = final_scale_ao
                         else:  # Should not be reached due to CLI choices
                             print(
@@ -471,12 +530,17 @@ def main():
                                 quantized_state_dict[_scale_key_to_use_] = (
                                     scale_factor_for_comfyui_to_save
                                 )
+                                scale_repr = (
+                                    str(scale_factor_for_comfyui_to_save.item())
+                                    if scale_factor_for_comfyui_to_save.numel() == 1
+                                    else str(scale_factor_for_comfyui_to_save.tolist())
+                                )
                                 print(
-                                    f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale saved as {_scale_key_to_use_}: {scale_factor_for_comfyui_to_save.item():.5g}"
+                                    f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale saved as {_scale_key_to_use_}: {scale_repr}"
                                 )
                             else:
                                 print(
-                                    f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale for {key} not saved separately (key conflict)."
+                                    f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale for {key} not saved separately (key conflict). Print scale: {str(scale_factor_for_comfyui_to_save)}"
                                 )
                             quantized_count += 1
                         # else: this case should be covered if processed_fp8_tensor or processed_scale_factor becomes None
@@ -505,21 +569,21 @@ def main():
                 if "torchao_config" in locals():
                     del torchao_config
 
-        # NATIVE OWLSCALE QUANTIZATION PATH
+        # NATIVE comfyscale QUANTIZATION PATH
         elif (
-            args.owlscale
-            and not is_torchao_method  # Ensure owlscale is not run if torchao is active
+            args.comfyscale
+            and not is_torchao_method  # Ensure comfyscale is not run if torchao is active
             and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
             and tensor_to_process.is_floating_point()
             and (not key.endswith(".bias"))
         ):
             print(" (Applying ComfyUI-style scaled FP8 quantization)...", end="")
 
-            original_hp_tensor = tensor_to_process.to(OWLSCALE_COMPUTE_DTYPE)
+            original_hp_tensor = tensor_to_process.to(comfyscale_COMPUTE_DTYPE)
             abs_max = torch.max(torch.abs(original_hp_tensor))
             scale_factor_for_comfyui_val = abs_max.clamp(min=1e-12)
             scale_factor_for_comfyui_to_save = scale_factor_for_comfyui_val.to(
-                OWLSCALE_SCALE_DTYPE
+                comfyscale_SCALE_DTYPE
             ).to(original_tensor_device)
 
             input_for_quantization_hp = (
@@ -679,13 +743,13 @@ def main():
                         original_tensor_cpu_for_plot.dtype
                     )
             else:  # Native methods dequantization
-                # For owlscale, the input to stochastic_round_tensor_to_fp8 was already scaled.
+                # For comfyscale, the input to stochastic_round_tensor_to_fp8 was already scaled.
                 # Dequantization is multiplication by scale.
                 if (
-                    args.owlscale
+                    args.comfyscale
                     and scale_factor_for_comfyui_to_save is not None
                     and not key.endswith(".bias")
-                ):  # scale_factor_for_comfyui_to_save is from owlscale path
+                ):  # scale_factor_for_comfyui_to_save is from comfyscale path
                     dequantized_tensor_cpu_for_plot = (
                         quantized_tensor_cpu_for_plot.to(
                             scale_factor_for_comfyui_to_save.dtype
@@ -725,7 +789,7 @@ def main():
             if "tensor_to_process" in locals():
                 del tensor_to_process
             if "original_hp_tensor" in locals():
-                del original_hp_tensor  # From owlscale
+                del original_hp_tensor  # From comfyscale
             torch.cuda.empty_cache()
     # End of per-tensor loop
 
@@ -733,10 +797,10 @@ def main():
         f"\nQuantization complete. {quantized_count}/{total_tensors} tensors were processed for quantization."
     )
 
-    if (args.owlscale and not is_torchao_method) or (
+    if (args.comfyscale and not is_torchao_method) or (
         is_torchao_method and quantized_count > 0
     ):
-        # Add marker if owlscale was used (native) or if torchao quantized something (implying scales might be used)
+        # Add marker if comfyscale was used (native) or if torchao quantized something (implying scales might be used)
         print(
             f"Adding FP8 marker key 'scaled_fp8' for ComfyUI compatibility (method: {args.quant_method})."
         )

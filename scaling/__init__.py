@@ -1,2 +1,2 @@
-from .get_fp8_constants_for_owlscale import get_fp8_constants_for_owlscale
-from .apply_owlscale_preprocess import apply_owlscale_preprocess
+from .get_fp8_constants_for_comfyscale import get_fp8_constants_for_comfyscale
+from .apply_comfyscale_preprocess import apply_comfyscale_preprocess

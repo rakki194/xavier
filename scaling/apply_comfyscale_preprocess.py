@@ -1,7 +1,7 @@
 import torch
 
 
-def apply_owlscale_preprocess(
+def apply_comfyscale_preprocess(
     tensor: torch.Tensor,
     target_fp8_dtype: torch.dtype,  # Not used in current body, but kept for signature consistency
     fp8_min_val: float,
@@ -16,7 +16,7 @@ def apply_owlscale_preprocess(
     """
     if debug_mode:
         print(
-            f"DEBUG apply_owlscale_preprocess for tensor: shape={tensor.shape}, initial_dtype={tensor.dtype}, device={tensor.device}"
+            f"DEBUG apply_comfyscale_preprocess for tensor: shape={tensor.shape}, initial_dtype={tensor.dtype}, device={tensor.device}"
         )
         if tensor.numel() > 0:
             print(

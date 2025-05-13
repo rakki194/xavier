@@ -1,7 +1,7 @@
 import torch
 
 
-def get_fp8_constants_for_owlscale(
+def get_fp8_constants_for_comfyscale(
     fp8_dtype: torch.dtype,
 ) -> tuple[float, float, float]:
     """Gets the min, max, and smallest positive normal value for a given FP8 dtype."""
