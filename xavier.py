@@ -7,6 +7,32 @@ from scaling import get_fp8_constants_for_owlscale
 from plotting_utils import MATPLOTLIB_AVAILABLE, generate_comparison_plots
 from safetensors_utils import load_tensor_from_safetensors, get_safetensors_tensor_keys
 
+# TorchAO imports
+try:
+    import torchao
+    from torchao.quantization import (
+        quantize_,
+        Float8WeightOnlyConfig,
+        Float8DynamicActivationFloat8WeightConfig,
+    )
+    from torchao.quantization.granularity import (
+        PerTensor,
+    )  # Using PerTensor as a default for dynamic
+    from torchao.dtypes import AffineQuantizedTensor
+    from torchao.float8.float8_utils import to_fp8_saturated
+
+    # For plotting dequantization if using lower-level primitives:
+    # from torchao.quantization.quant_primitives import dequantize_affine_floatx
+    TORCHAO_AVAILABLE = True
+except ImportError:
+    TORCHAO_AVAILABLE = False
+
+    # Define dummy classes if torchao is not available to prevent NameError later if accessed
+    # This is mainly for type checking and avoiding runtime errors if TORCHAO_AVAILABLE check fails.
+    class AffineQuantizedTensor:
+        pass
+
+
 """
 Quantizes a .safetensors model to FP8 using various stochastic rounding techniques.
 
@@ -25,9 +51,35 @@ OWLSCALE_FP8_MAX = None
 OWLSCALE_FP8_MIN_POS = None
 
 
+# Dummy Module for TorchAO
+class DummyModule(torch.nn.Module):
+    def __init__(self, weight_tensor, bias_tensor=None):
+        super().__init__()
+        out_features, in_features = weight_tensor.shape
+        self.linear = torch.nn.Linear(
+            in_features, out_features, bias=(bias_tensor is not None)
+        )
+        self.linear.weight = torch.nn.Parameter(
+            weight_tensor.clone().detach(), requires_grad=False
+        )
+        if bias_tensor is not None:
+            self.linear.bias = torch.nn.Parameter(
+                bias_tensor.clone().detach(), requires_grad=False
+            )
+        else:
+            self.linear.bias = None
+
+    def forward(self, x):
+        # Dummy forward, may not be strictly needed for weight-only quant via torchao's quantize_
+        # but safer to include for general compatibility with torch.compile/quantize flows.
+        # Input x would need to match in_features.
+        # This forward pass won't actually be called in xavier.py's current usage.
+        return self.linear(x)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Quantize a .safetensors model to FP8 with stochastic rounding."
+        description="Quantize a .safetensors model to FP8 with stochastic rounding or TorchAO."
     )
     parser.add_argument(
         "input_file", type=str, help="Path to the input .safetensors model file."
@@ -36,6 +88,22 @@ def main():
         "output_file",
         type=str,
         help="Path to save the quantized .safetensors model file.",
+    )
+    # Quantization method
+    parser.add_argument(
+        "--quant_method",
+        type=str,
+        default="native",
+        choices=[
+            "native",
+            "torchao_fp8_weight_only_aoscale",
+            "torchao_fp8_weight_only_comfyscale",
+            "torchao_fp8_dynamic_act_weight_aoscale",
+            "torchao_fp8_dynamic_act_weight_comfyscale",
+        ],
+        help="Quantization method to use. 'native' uses xavier.py's original methods. "
+        "'torchao_..._aoscale' uses TorchAO with its native scaling. "
+        "'torchao_..._comfyscale' uses TorchAO with ComfyUI/owlscale compatible scaling.",
     )
     # FP8 specific arguments
     parser.add_argument(
@@ -49,28 +117,31 @@ def main():
         "--keys_to_quantize_suffix",
         type=str,
         nargs="+",
-        default=[".weight", ".bias"],
+        default=[
+            ".weight"
+        ],  # Changed default to mostly target weights for TorchAO's typical use with DummyModule
         help="Suffixes of keys to identify tensors for FP8 quantization (e.g., '.weight' '.bias').",
     )
+    # Native specific arguments
     parser.add_argument(
         "--complex_rounding",
         action="store_true",
-        help="Use a more complex neighbor finding method for FP8 stochastic rounding.",
+        help="Use a more complex neighbor finding method for FP8 stochastic rounding (native method only).",
     )
     parser.add_argument(
         "--shifturb",
         action="store_true",
-        help="Use shift-and-perturb (additive noise) FP8 stochastic rounding method.",
+        help="Use shift-and-perturb (additive noise) FP8 stochastic rounding method (native method only).",
     )
     parser.add_argument(
         "--owlshift",
         action="store_true",
-        help="Use owlshift (manual stochastic mantissa rounding) FP8 method.",
+        help="Use owlshift (manual stochastic mantissa rounding) FP8 method (native method only).",
     )
     parser.add_argument(
         "--owlscale",
         action="store_true",
-        help="Apply per-tensor max-abs scaling before FP8 stochastic rounding (from reference script).",
+        help="Apply per-tensor max-abs scaling before FP8 stochastic rounding (native method only, TorchAO handles its own scaling).",
     )
     parser.add_argument(
         "--seed",
@@ -118,6 +189,21 @@ def main():
     args = parser.parse_args()
     main_device = torch.device(args.device)
 
+    is_torchao_method = "torchao_" in args.quant_method
+
+    if is_torchao_method and not TORCHAO_AVAILABLE:
+        print(
+            f"Error: TorchAO method '{args.quant_method}' selected, but torchao library is not installed or importable."
+        )
+        print("Please install torchao: pip install torchao")
+        return
+
+    if is_torchao_method:
+        if args.complex_rounding or args.shifturb or args.owlshift or args.owlscale:
+            print(
+                "Warning: Native quantization flags (--complex_rounding, --shifturb, --owlshift, --owlscale) are ignored when a TorchAO method is selected."
+            )
+
     if not os.path.exists(args.input_file):
         print(f"Error: Input file not found: {args.input_file}")
         return
@@ -145,35 +231,37 @@ def main():
     quantized_state_dict = {}
     total_tensors = len(tensor_keys)
 
-    print(
-        f"FP8 Path: Target FP8 type: {fp8_dtype}, Device for quantization: {main_device}"
-    )
-    print(
-        f"FP8 Path: Will attempt to quantize tensors with keys ending in: {args.keys_to_quantize_suffix}"
-    )
-    if args.complex_rounding:
+    print(f"Using quantization method: {args.quant_method}")
+    print(f"Target FP8 type: {fp8_dtype}, Device for quantization: {main_device}")
+    if (
+        not is_torchao_method
+    ):  # Print native-specific messages only if not using torchao
         print(
-            "FP8 Path: Using complex neighbor finding method for stochastic rounding."
+            f"Will attempt to quantize tensors with keys ending in: {args.keys_to_quantize_suffix}"
         )
-    if args.shifturb:
-        print("FP8 Path: Using shift-and-perturb (additive noise) stochastic rounding.")
-    if args.owlshift:
+        if args.complex_rounding:
+            print("Using complex neighbor finding method for stochastic rounding.")
+        if args.shifturb:
+            print("Using shift-and-perturb (additive noise) stochastic rounding.")
+        if args.owlshift:
+            print(
+                f"Using owlshift (manual stochastic mantissa rounding) with seed: {args.seed}."
+            )
+        if args.owlscale:
+            print(f"Using owlscale (per-tensor max-abs scaling pre-quantization).")
+            global OWLSCALE_COMPUTE_DTYPE, OWLSCALE_SCALE_DTYPE
+            global OWLSCALE_FP8_MIN, OWLSCALE_FP8_MAX, OWLSCALE_FP8_MIN_POS
+            OWLSCALE_COMPUTE_DTYPE = torch.float64
+            OWLSCALE_SCALE_DTYPE = torch.float64
+            OWLSCALE_FP8_MIN, OWLSCALE_FP8_MAX, OWLSCALE_FP8_MIN_POS = (
+                get_fp8_constants_for_owlscale(fp8_dtype)
+            )
+            print(
+                f"  Owlscale FP8 Target: {fp8_dtype}, Range: [{OWLSCALE_FP8_MIN}, {OWLSCALE_FP8_MAX}], Min Pos: {OWLSCALE_FP8_MIN_POS:.2e}"
+            )
+    else:  # TorchAO specific messages
         print(
-            f"FP8 Path: Using owlshift (manual stochastic mantissa rounding) with seed: {args.seed}."
-        )
-    if args.owlscale:
-        print(
-            f"FP8 Path: Using owlscale (per-tensor max-abs scaling pre-quantization)."
-        )
-        global OWLSCALE_COMPUTE_DTYPE, OWLSCALE_SCALE_DTYPE
-        global OWLSCALE_FP8_MIN, OWLSCALE_FP8_MAX, OWLSCALE_FP8_MIN_POS
-        OWLSCALE_COMPUTE_DTYPE = torch.float64
-        OWLSCALE_SCALE_DTYPE = torch.float64
-        OWLSCALE_FP8_MIN, OWLSCALE_FP8_MAX, OWLSCALE_FP8_MIN_POS = (
-            get_fp8_constants_for_owlscale(fp8_dtype)
-        )
-        print(
-            f"  Owlscale FP8 Target: {fp8_dtype}, Range: [{OWLSCALE_FP8_MIN}, {OWLSCALE_FP8_MAX}], Min Pos: {OWLSCALE_FP8_MIN_POS:.2e}"
+            f"TorchAO will target tensors with keys ending in: {args.keys_to_quantize_suffix} (primarily for nn.Linear weights via DummyModule)."
         )
 
     if args.plot and not MATPLOTLIB_AVAILABLE:
@@ -191,14 +279,10 @@ def main():
 
     for i, key in enumerate(tensor_keys):
         try:
-            # Load tensor on-the-fly
-            # We load to CPU first as original script did, then move to main_device if needed
             tensor = load_tensor_from_safetensors(args.input_file, key, device="cpu")
         except Exception as e:
             print(f"\nError loading tensor {key}: {e}. Skipping this tensor.")
-            if (
-                key in quantized_state_dict
-            ):  # Should not happen if loading failed before processing
+            if key in quantized_state_dict:
                 del quantized_state_dict[key]
             continue
 
@@ -206,11 +290,12 @@ def main():
         if args.plot and plots_generated_count < args.plot_max_tensors:
             original_tensor_for_plot_and_type = tensor.detach().clone().cpu()
 
+        # This variable will store the scale from torchao if applicable
         scale_factor_for_comfyui_to_save = None
 
         if args.debug:
             print(
-                f"DEBUG main loop for tensor {key}: complex_flag={args.complex_rounding}, shifturb_flag={args.shifturb}, owlshift_flag={args.owlshift}, owlscale_flag={args.owlscale}"
+                f"DEBUG main loop for tensor {key}: quant_method={args.quant_method}, complex_flag={args.complex_rounding}, shifturb_flag={args.shifturb}, owlshift_flag={args.owlshift}, owlscale_flag={args.owlscale}"
             )
             if tensor.numel() > 0:
                 print(
@@ -224,30 +309,219 @@ def main():
             end="",
         )
 
-        original_tensor_device = tensor.device  # Should be CPU from load_file
+        original_tensor_device = tensor.device
         tensor_to_process = tensor.to(main_device)
 
+        # TORCHAO QUANTIZATION PATH
         if (
-            args.owlscale
+            is_torchao_method
             and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
             and tensor_to_process.is_floating_point()
-            and (
-                not key.endswith(".bias")
-            )  # Exclude bias from ComfyUI-style owlscale path
+            and tensor_to_process.dim() >= 2
+        ):  # TorchAO typically for Linear layers (2D weights)
+            print(f" (Applying {args.quant_method} quantization)...", end="")
+
+            # Bias handling for DummyModule - very simplified for now.
+            # Assumes if a .weight is quantized, its .bias (if exists and loaded) is part of the same conceptual layer.
+            # This simple DummyModule approach primarily targets the weight tensor for quantization.
+            # More sophisticated handling would require knowing the model structure.
+            bias_for_dummy_module = None
+            # if key.endswith(".weight"):
+            #    bias_key_try = key[:-len(".weight")] + ".bias"
+            #    # This is tricky: tensor_keys contains ALL keys. We need to know if this specific bias
+            #    # has been loaded and is on main_device. The current loop processes one key at a time.
+            #    # For now, passing None for bias to DummyModule.
+            #    # If biases are to be quantized by torchao, they need to be part of the module torchao sees.
+
+            # Create a dummy module with the weight tensor
+            # Ensure tensor_to_process is a Parameter for the nn.Linear in DummyModule
+            if tensor_to_process.dim() < 2:
+                print(
+                    f" Warning: Tensor {key} has dim < 2 ({tensor_to_process.dim()}), skipping TorchAO as it expects Linear-like weights. Copying original.",
+                    end="",
+                )
+                quantized_state_dict[key] = tensor.to(original_tensor_device)
+                print(" Done.")  # Newline for this path
+                # plots will be handled by the later plotting block if applicable (for non-quantized)
+            else:
+                dummy_model = DummyModule(
+                    tensor_to_process.clone(), bias_tensor=None
+                ).to(main_device)
+
+                torchao_config = None
+                if "torchao_fp8_weight_only" in args.quant_method:
+                    torchao_config = Float8WeightOnlyConfig(weight_dtype=fp8_dtype)
+                elif "torchao_fp8_dynamic_act_weight" in args.quant_method:
+                    torchao_config = Float8DynamicActivationFloat8WeightConfig(
+                        activation_dtype=fp8_dtype,
+                        weight_dtype=fp8_dtype,
+                        granularity=PerTensor(),  # Defaulting to PerTensor, can be made configurable
+                    )
+
+                if torchao_config:
+                    quantize_(dummy_model, torchao_config)
+
+                    quantized_weight_from_module = dummy_model.linear.weight
+
+                    # Check if the weight was indeed replaced by an AffineQuantizedTensor or part of a Float8Linear module
+                    final_quantized_tensor_data_ao = None
+                    final_scale_ao = None
+
+                    if isinstance(quantized_weight_from_module, AffineQuantizedTensor):
+                        final_quantized_tensor_data_ao = (
+                            quantized_weight_from_module.tensor_impl.data
+                        )
+                        final_scale_ao = quantized_weight_from_module.tensor_impl.scale
+                    elif hasattr(dummy_model.linear, "_weight_aqt") and isinstance(
+                        dummy_model.linear._weight_aqt, AffineQuantizedTensor
+                    ):  # For Float8Linear case
+                        final_quantized_tensor_data_ao = (
+                            dummy_model.linear._weight_aqt.tensor_impl.data
+                        )
+                        final_scale_ao = (
+                            dummy_model.linear._weight_aqt.tensor_impl.scale
+                        )
+                    elif (
+                        hasattr(dummy_model.linear, "weight")
+                        and dummy_model.linear.weight.dtype == fp8_dtype
+                        and hasattr(quantized_weight_from_module, "_scale")
+                    ):  # Check for Float8Tensor's scale
+                        final_quantized_tensor_data_ao = quantized_weight_from_module
+                        final_scale_ao = quantized_weight_from_module._scale
+                    else:
+                        print(
+                            f" Warning: TorchAO quantized {key} to {fp8_dtype} but the expected quantized tensor (AffineQuantizedTensor or Float8Tensor with scale) was not found. Copying original.",
+                            end="",
+                        )
+                        quantized_state_dict[key] = tensor.to(original_tensor_device)
+                        print(" Done.")
+                        # Continue to next tensor or clean up dummy_model
+                        del dummy_model
+                        if "torchao_config" in locals():
+                            del torchao_config
+                        continue
+
+                    if (
+                        final_quantized_tensor_data_ao is not None
+                        and final_scale_ao is not None
+                    ):
+                        processed_fp8_tensor = None
+                        processed_scale_factor = None
+
+                        if "comfyscale" in args.quant_method:
+                            print(f" (Adapting to ComfyUI scale convention)...", end="")
+                            fp8_qmax = torch.finfo(fp8_dtype).max
+
+                            scale_ao_compute = final_scale_ao.to(
+                                dtype=torch.float32, device=main_device
+                            )
+                            fp8_tensor_ao_compute = final_quantized_tensor_data_ao.to(
+                                dtype=torch.float32, device=main_device
+                            )
+
+                            comfy_scale = scale_ao_compute * fp8_qmax
+                            temp_dequant_for_comfy = fp8_tensor_ao_compute / fp8_qmax
+
+                            comfy_fp8_tensor = to_fp8_saturated(
+                                temp_dequant_for_comfy, target_dtype=fp8_dtype
+                            )
+
+                            processed_fp8_tensor = comfy_fp8_tensor
+                            processed_scale_factor = comfy_scale
+
+                        elif "aoscale" in args.quant_method:
+                            print(f" (Using native TorchAO scale)...", end="")
+                            processed_fp8_tensor = final_quantized_tensor_data_ao
+                            processed_scale_factor = final_scale_ao
+                        else:  # Should not be reached due to CLI choices
+                            print(
+                                f" Internal Error: Unknown TorchAO scaling variant for {key}. Copying original.",
+                                end="",
+                            )
+                            quantized_state_dict[key] = tensor.to(
+                                original_tensor_device
+                            )
+                            print(" Done.")
+                            # Continue to next tensor or clean up dummy_model
+                            del dummy_model
+                            if "torchao_config" in locals():
+                                del torchao_config
+                            continue
+
+                        if (
+                            processed_fp8_tensor is not None
+                            and processed_scale_factor is not None
+                        ):
+                            quantized_state_dict[key] = processed_fp8_tensor.to(
+                                original_tensor_device
+                            )
+                            scale_factor_for_comfyui_to_save = (
+                                processed_scale_factor.to(original_tensor_device)
+                            )
+
+                            _scale_key_to_use_ = ""
+                            scale_key_parts = key.split(".")
+                            if scale_key_parts[-1] == "weight":
+                                scale_key_parts[-1] = "scale_weight"
+                                _scale_key_to_use_ = ".".join(scale_key_parts)
+                            else:
+                                _scale_key_to_use_ = key + ".scale_absmax"
+
+                            if _scale_key_to_use_ != key:
+                                quantized_state_dict[_scale_key_to_use_] = (
+                                    scale_factor_for_comfyui_to_save
+                                )
+                                print(
+                                    f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale saved as {_scale_key_to_use_}: {scale_factor_for_comfyui_to_save.item():.5g}"
+                                )
+                            else:
+                                print(
+                                    f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale for {key} not saved separately (key conflict)."
+                                )
+                            quantized_count += 1
+                        # else: this case should be covered if processed_fp8_tensor or processed_scale_factor becomes None
+
+                    elif (
+                        final_quantized_tensor_data_ao is not None
+                        and final_scale_ao is None
+                    ):
+                        print(
+                            f" Warning: TorchAO quantized {key} to {fp8_dtype} but scale not found directly. Scale factor cannot be adapted or saved. Copying original.",
+                            end="",
+                        )
+                        quantized_state_dict[key] = tensor.to(original_tensor_device)
+                        print(" Done.")
+                    # The case where final_quantized_tensor_data_ao is None is handled by the initial check after getting AQT/Float8Tensor components
+
+                else:  # Should not happen if args.quant_method is valid and contains torchao_
+                    print(
+                        f" Error: No TorchAO config for method '{args.quant_method}'. Copying original.",
+                        end="",
+                    )
+                    quantized_state_dict[key] = tensor.to(original_tensor_device)
+                    print(" Done.")
+
+                del dummy_model
+                if "torchao_config" in locals():
+                    del torchao_config
+
+        # NATIVE OWLSCALE QUANTIZATION PATH
+        elif (
+            args.owlscale
+            and not is_torchao_method  # Ensure owlscale is not run if torchao is active
+            and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
+            and tensor_to_process.is_floating_point()
+            and (not key.endswith(".bias"))
         ):
             print(" (Applying ComfyUI-style scaled FP8 quantization)...", end="")
 
-            # 1. Determine scale_factor_for_comfyui
             original_hp_tensor = tensor_to_process.to(OWLSCALE_COMPUTE_DTYPE)
             abs_max = torch.max(torch.abs(original_hp_tensor))
-
             scale_factor_for_comfyui_val = abs_max.clamp(min=1e-12)
-
             scale_factor_for_comfyui_to_save = scale_factor_for_comfyui_val.to(
                 OWLSCALE_SCALE_DTYPE
             ).to(original_tensor_device)
 
-            # 2. Prepare tensor for quantization: original_tensor / scale
             input_for_quantization_hp = (
                 tensor_to_process.to(scale_factor_for_comfyui_val.dtype)
                 / scale_factor_for_comfyui_val
@@ -266,7 +540,6 @@ def main():
                         f"  Tensor {key} input_for_quantization (orig / scale) is empty."
                     )
 
-            # 3. Quantize the scaled tensor
             quantized_tensor = stochastic_round_tensor_to_fp8(
                 input_for_quantization,
                 fp8_dtype,
@@ -276,11 +549,9 @@ def main():
                 seed=main_seed + i,
                 debug_mode=args.debug,
             )
-
-            # 4. Save quantized tensor and the scale factor
             quantized_state_dict[key] = quantized_tensor.to(original_tensor_device)
 
-            _scale_key_to_use_ = ""  # Renamed from scale_key in user code to avoid conflict if used later
+            _scale_key_to_use_ = ""
             scale_key_parts = key.split(".")
             if scale_key_parts[-1] == "weight":
                 scale_key_parts[-1] = "scale_weight"
@@ -293,7 +564,6 @@ def main():
                     scale_factor_for_comfyui_to_save
                 )
                 if main_device.type == "cuda":
-                    # Delete tensors on main_device (CUDA) now that CPU copies are stored
                     if "original_hp_tensor" in locals():
                         del original_hp_tensor
                     if "scale_factor_for_comfyui_val" in locals() and isinstance(
@@ -307,25 +577,25 @@ def main():
                     if "quantized_tensor" in locals():
                         del quantized_tensor
             else:
-                # This print should be conditional on args.debug or be a warning
                 print(
                     f" Warning: Could not determine unique scale key for {key} (generated scale key was the same: {_scale_key_to_use_}). Scale not saved separately."
                 )
-
             quantized_count += 1
-            # The following print statements replace the general " Done." that was previously outside this if/elif/else block
             print(f" Done. New dtype: {quantized_state_dict[key].dtype}", end="")
-            if scale_factor_for_comfyui_to_save is not None:
+            if (
+                scale_factor_for_comfyui_to_save is not None
+                and _scale_key_to_use_ != key
+            ):
                 print(
                     f" Scale factor for {key} (as {_scale_key_to_use_}): {scale_factor_for_comfyui_to_save.item():.5g}",
                     end="",
                 )
-            # The final newline will be handled by the outer loop's print(" Done.") structure if that's kept,
-            # or this line needs its own implicit newline if the outer " Done." is removed.
-            # For now, ending this block's specific prints.
+            print()  # Newline for this path's status
 
+        # NATIVE GENERAL FP8 QUANTIZATION PATH
         elif (
-            any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
+            not is_torchao_method  # Ensure not torchao
+            and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
             and tensor_to_process.is_floating_point()
         ):
             print(" (Applying general FP8 quantization)...", end="")
@@ -335,99 +605,105 @@ def main():
                 use_complex_method=args.complex_rounding,
                 use_shift_perturb_method=args.shifturb,
                 use_owlshift_method=args.owlshift,
-                seed=(
-                    main_seed + i if args.owlshift else main_seed
-                ),  # Vary seed per tensor for owlshift
+                seed=(main_seed + i if args.owlshift else main_seed),
                 debug_mode=args.debug,
             )
-            quantized_state_dict[key] = quantized_tensor_fp8.to(
-                original_tensor_device
-            )  # Store on CPU
+            quantized_state_dict[key] = quantized_tensor_fp8.to(original_tensor_device)
             if main_device.type == "cuda":
-                # Delete tensor on main_device (CUDA) now that CPU copy is stored
                 if "quantized_tensor_fp8" in locals():
                     del quantized_tensor_fp8
-
             quantized_count += 1
-            print(" Done.")
+            print(
+                f" Done. New dtype: {quantized_state_dict[key].dtype}."
+            )  # Newline for this path's status
 
-            if (
-                args.plot
-                and original_tensor_for_plot_and_type is not None
-                and plots_generated_count < args.plot_max_tensors
-                and key in quantized_state_dict
-            ):
-                if tensor_to_process.is_floating_point() and any(
-                    key.endswith(suffix) for suffix in args.keys_to_quantize_suffix
-                ):
-                    print(f"  Generating plot for {key}...")
-                    # Prepare arguments for generate_comparison_plots
-                    original_tensor_cpu_for_plot = (
-                        original_tensor_for_plot_and_type  # Already on CPU
-                    )
-                    quantized_tensor_cpu_for_plot = quantized_state_dict[key].cpu()
-                    dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
-                        original_tensor_cpu_for_plot.dtype
-                    )
-
-                    # Construct a safe filename for the plot
-                    safe_tensor_key_for_filename = key.replace("/", "_").replace(
-                        ".", "_"
-                    )
-                    plot_file_path = os.path.join(
-                        args.plot_dir, f"{safe_tensor_key_for_filename}_comparison.png"
-                    )
-
-                    original_dtype_name = str(original_tensor_cpu_for_plot.dtype)
-                    fp8_dtype_name = str(
-                        fp8_dtype
-                    )  # fp8_dtype is like torch.float8_e4m3fn
-
-                    generate_comparison_plots(
-                        original_tensor_cpu=original_tensor_cpu_for_plot,
-                        quantized_fp8_tensor_cpu=quantized_tensor_cpu_for_plot,
-                        dequantized_tensor_cpu=dequantized_tensor_cpu_for_plot,
-                        tensor_key=key,
-                        plot_filename=plot_file_path,
-                        original_dtype_str=original_dtype_name,
-                        fp8_dtype_str=fp8_dtype_name,
-                        sample_size=args.plot_sample_size,
-                    )
-                    plots_generated_count += 1
-
+        # NO QUANTIZATION (COPY AS IS)
         else:
-            print(" (Skipping quantization, copying as is)...", end="")
-            quantized_state_dict[key] = tensor.to(original_tensor_device)  # Copy to CPU
+            if not (
+                is_torchao_method
+                and any(key.endswith(suffix) for suffix in args.keys_to_quantize_suffix)
+                and tensor_to_process.is_floating_point()
+                and tensor_to_process.dim() < 2
+            ):  # Avoid double print if torchao skipped due to dim
+                print(
+                    " (Skipping quantization, copying as is)... Done."
+                )  # Newline for this path's status
+            quantized_state_dict[key] = tensor.to(original_tensor_device)
 
-        print(" Done.")
-
+        # PLOTTING LOGIC (common to all paths that might have quantized)
         if (
             args.plot
             and original_tensor_for_plot_and_type is not None
             and plots_generated_count < args.plot_max_tensors
-            and key in quantized_state_dict
+            and key in quantized_state_dict  # Ensure key made it to output
+            and quantized_state_dict[key].dtype
+            in [torch.float8_e4m3fn, torch.float8_e5m2]  # Only plot if actually FP8
         ):
-            if tensor_to_process.is_floating_point() and any(
-                key.endswith(suffix) for suffix in args.keys_to_quantize_suffix
-            ):
-                print(f"  Generating plot for {key}...")
-                # Prepare arguments for generate_comparison_plots
-                original_tensor_cpu_for_plot = (
-                    original_tensor_for_plot_and_type  # Already on CPU
-                )
-                quantized_tensor_cpu_for_plot = quantized_state_dict[key].cpu()
-                dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
-                    original_tensor_cpu_for_plot.dtype
-                )
+            # Ensure tensor was actually processed for quantization by one of the methods
+            # This check needs to be more robust based on which path was taken.
+            # For now, assume if it's FP8 in dict, it was quantized.
 
-                # Construct a safe filename for the plot
+            print(f"  Generating plot for {key}...")
+            original_tensor_cpu_for_plot = original_tensor_for_plot_and_type
+            quantized_tensor_cpu_for_plot = quantized_state_dict[key].cpu()
+
+            dequantized_tensor_cpu_for_plot = None
+
+            if is_torchao_method:
+                # Attempt to dequantize TorchAO tensor for plotting
+                _scale_key_to_use_plot_ = ""
+                scale_key_parts_plot = key.split(".")
+                if scale_key_parts_plot[-1] == "weight":
+                    scale_key_parts_plot[-1] = "scale_weight"
+                    _scale_key_to_use_plot_ = ".".join(scale_key_parts_plot)
+                else:
+                    _scale_key_to_use_plot_ = key + ".scale_absmax"
+
+                if _scale_key_to_use_plot_ in quantized_state_dict:
+                    scale_cpu_plot = quantized_state_dict[_scale_key_to_use_plot_].cpu()
+
+                    # Simplified dequantization for plotting:
+                    # Cast FP8 data to float32, multiply by scale (also float32), then cast to original tensor's dtype.
+                    dequant_hp_plot = quantized_tensor_cpu_for_plot.to(
+                        torch.float32
+                    ) * scale_cpu_plot.to(torch.float32)
+                    dequantized_tensor_cpu_for_plot = dequant_hp_plot.to(
+                        original_tensor_cpu_for_plot.dtype
+                    )
+
+                else:
+                    print(
+                        f"      Warning: Scale not found for TorchAO-quantized tensor {key} for plotting. Using direct cast."
+                    )
+                    dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
+                        original_tensor_cpu_for_plot.dtype
+                    )
+            else:  # Native methods dequantization
+                # For owlscale, the input to stochastic_round_tensor_to_fp8 was already scaled.
+                # Dequantization is multiplication by scale.
+                if (
+                    args.owlscale
+                    and scale_factor_for_comfyui_to_save is not None
+                    and not key.endswith(".bias")
+                ):  # scale_factor_for_comfyui_to_save is from owlscale path
+                    dequantized_tensor_cpu_for_plot = (
+                        quantized_tensor_cpu_for_plot.to(
+                            scale_factor_for_comfyui_to_save.dtype
+                        )
+                        * scale_factor_for_comfyui_to_save.cpu()
+                    ).to(original_tensor_cpu_for_plot.dtype)
+                else:  # General FP8 path (no explicit scale factor saved alongside, dequant is just type cast)
+                    dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
+                        original_tensor_cpu_for_plot.dtype
+                    )
+
+            if dequantized_tensor_cpu_for_plot is not None:
                 safe_tensor_key_for_filename = key.replace("/", "_").replace(".", "_")
                 plot_file_path = os.path.join(
                     args.plot_dir, f"{safe_tensor_key_for_filename}_comparison.png"
                 )
-
                 original_dtype_name = str(original_tensor_cpu_for_plot.dtype)
-                fp8_dtype_name = str(fp8_dtype)  # fp8_dtype is like torch.float8_e4m3fn
+                fp8_dtype_name = str(fp8_dtype)
 
                 generate_comparison_plots(
                     original_tensor_cpu=original_tensor_cpu_for_plot,
@@ -440,28 +716,38 @@ def main():
                     sample_size=args.plot_sample_size,
                 )
                 plots_generated_count += 1
+            else:
+                print(
+                    f"      Skipping plot for {key} as dequantized tensor could not be obtained."
+                )
 
         if main_device.type == "cuda":
-            # Explicitly delete tensor_to_process if it was on CUDA and is no longer needed
             if "tensor_to_process" in locals():
                 del tensor_to_process
+            if "original_hp_tensor" in locals():
+                del original_hp_tensor  # From owlscale
             torch.cuda.empty_cache()
+    # End of per-tensor loop
 
     print(
-        f"Quantization complete. {quantized_count}/{total_tensors} tensors were processed for quantization."
+        f"\nQuantization complete. {quantized_count}/{total_tensors} tensors were processed for quantization."
     )
 
-    if (
-        args.owlscale
-    ):  # Add marker only if ComfyUI-style scaling was attempted for some weights
-        print("Adding FP8 marker key 'scaled_fp8' for ComfyUI compatibility.")
-        # We use the fp8_dtype determined from args.fp8_type for the marker
-        quantized_state_dict["scaled_fp8"] = torch.empty((2), dtype=fp8_dtype)
+    if (args.owlscale and not is_torchao_method) or (
+        is_torchao_method and quantized_count > 0
+    ):
+        # Add marker if owlscale was used (native) or if torchao quantized something (implying scales might be used)
+        print(
+            f"Adding FP8 marker key 'scaled_fp8' for ComfyUI compatibility (method: {args.quant_method})."
+        )
+        quantized_state_dict["scaled_fp8"] = torch.empty(
+            (2), dtype=fp8_dtype
+        )  # Use the globally determined fp8_dtype
 
     try:
         print(f"Saving quantized model to: {args.output_file}")
         save_file(quantized_state_dict, args.output_file)
-        print(f"FP8 Quantized model saved to: {args.output_file}")
+        print(f"Quantized model saved to: {args.output_file}")
     except Exception as e:
         print(f"Error saving quantized model: {e}")
 
