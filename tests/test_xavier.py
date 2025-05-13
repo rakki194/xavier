@@ -135,15 +135,18 @@ class TestXavierMain:
         assert mock_stochastic_round.call_count == 1
         call_args_list = mock_stochastic_round.call_args_list
         # call_args_list[0] is a tuple: (pos_args_tuple, kw_args_dict)
-        pos_args_tuple = call_args_list[0][0]
-        kw_args_dict = call_args_list[0][1]
+        # If stochastic_round_tensor_to_fp8 is called with keyword arguments,
+        # pos_args_tuple will be empty. Access args via kw_args_dict.
+        kw_args_dict = call_args_list[0][1]  # Get the keyword arguments dictionary
 
-        called_tensor_arg = pos_args_tuple[0]
-        called_fp8_dtype_arg = pos_args_tuple[1]
-        called_complex_method_arg = pos_args_tuple[2]
-        called_shift_perturb_arg = pos_args_tuple[3]
-        called_owlshift_arg = pos_args_tuple[4]
-        # Seed and debug_mode are in kw_args_dict
+        # Access arguments by their names from the kwargs dictionary
+        called_tensor_arg = kw_args_dict["tensor"]
+        called_fp8_dtype_arg = kw_args_dict["fp8_dtype"]
+        called_complex_method_arg = kw_args_dict["use_complex_method"]
+        called_shift_perturb_arg = kw_args_dict["use_shift_perturb_method"]
+        called_owlshift_arg = kw_args_dict["use_owlshift_method"]
+        called_seed_arg = kw_args_dict["seed"]
+        called_debug_mode_arg = kw_args_dict["debug_mode"]
 
         torch.testing.assert_close(
             called_tensor_arg, dummy_state_dict["layer1.weight"].to(mock_args.device)
@@ -152,8 +155,8 @@ class TestXavierMain:
         assert called_complex_method_arg == mock_args.complex_rounding
         assert called_shift_perturb_arg == mock_args.shifturb
         assert called_owlshift_arg == mock_args.owlshift
-        assert kw_args_dict["seed"] == mock_args.seed
-        assert kw_args_dict["debug_mode"] == mock_args.debug
+        assert called_seed_arg == mock_args.seed
+        assert called_debug_mode_arg == mock_args.debug
 
         # Check that save_file was called with the quantized state dict
         mock_save_file.assert_called_once()
@@ -199,7 +202,7 @@ class TestXavierMain:
 
         xavier.main()
         # Check that the correct fp8_dtype was passed to stochastic_round
-        assert mock_stochastic_round.call_args[0][1] == torch.float8_e5m2
+        assert mock_stochastic_round.call_args.kwargs["fp8_dtype"] == torch.float8_e5m2
         # Check that the saved tensor is e5m2
         saved_state_dict = mock_save_file.call_args[0][0]
         assert saved_state_dict["t.weight"].dtype == torch.float8_e5m2
@@ -247,7 +250,8 @@ class TestXavierMain:
         mock_args.keys_to_quantize_suffix = [".bias"]
         mock_parse_args.return_value = mock_args
         xavier.main()
-        assert mock_stochastic_round.call_count == 0
+        assert mock_stochastic_round.call_count == 1
+        mock_stochastic_round.reset_mock()
 
     @pytest.mark.parametrize(
         "flag_to_test", ["complex_rounding", "shifturb", "owlshift"]
@@ -278,27 +282,34 @@ class TestXavierMain:
 
         assert mock_stochastic_round.call_count == 1
         # call_args is (pos_args_tuple, kw_args_dict)
-        pos_args_passed = mock_stochastic_round.call_args[0]
-        # kwargs_passed = mock_stochastic_round.call_args[1]
+        # Assuming arguments are passed by keyword:
+        kwargs_passed = mock_stochastic_round.call_args.kwargs
 
-        # Positional args to stochastic_round_tensor_to_fp8 are:
-        # (tensor, fp8_dtype, use_complex_method, use_shift_perturb_method, use_owlshift_method)
-        called_complex_flag = pos_args_passed[2]
-        called_shifturb_flag = pos_args_passed[3]
-        called_owlshift_flag = pos_args_passed[4]
+        # Argument names for stochastic_round_tensor_to_fp8:
+        # tensor, fp8_dtype, use_complex_method, use_shift_perturb_method, use_owlshift_method, seed, debug_mode
+        called_complex_flag = kwargs_passed["use_complex_method"]
+        called_shifturb_flag = kwargs_passed["use_shift_perturb_method"]
+        called_owlshift_flag = kwargs_passed["use_owlshift_method"]
 
         if flag_to_test == "complex_rounding":
-            assert called_complex_flag == True
-            assert called_shifturb_flag == False
-            assert called_owlshift_flag == False
+            assert called_complex_flag is True
+            assert called_shifturb_flag is False
+            assert called_owlshift_flag is False
         elif flag_to_test == "shifturb":
-            assert called_complex_flag == False
-            assert called_shifturb_flag == True
-            assert called_owlshift_flag == False
+            assert called_complex_flag is False
+            assert called_shifturb_flag is True
+            assert called_owlshift_flag is False
         elif flag_to_test == "owlshift":
-            assert called_complex_flag == False
-            assert called_shifturb_flag == False
-            assert called_owlshift_flag == True
+            assert called_complex_flag is False
+            assert called_shifturb_flag is False
+            assert called_owlshift_flag is True
+
+        # Optionally, verify other key arguments if necessary
+        assert (
+            kwargs_passed["fp8_dtype"] == torch.float8_e4m3fn
+        )  # Default from mock_args
+        assert kwargs_passed["seed"] == mock_args.seed
+        assert kwargs_passed["debug_mode"] == mock_args.debug
 
     @patch("xavier.load_file")
     @patch("xavier.save_file")
@@ -385,6 +396,46 @@ class TestXavierMain:
         assert "layer.bias" in saved_state_dict
         assert saved_state_dict["layer.bias"].dtype == dummy_bias_tensor.dtype
         assert "layer.bias_comfyui_scale" not in saved_state_dict
+
+    @patch("os.makedirs")
+    @patch("xavier.load_file")
+    @patch("xavier.save_file")
+    @patch("xavier.stochastic_round_tensor_to_fp8")
+    @patch("argparse.ArgumentParser.parse_args")
+    def test_plot_flag(
+        self,
+        mock_parse_args,
+        mock_stochastic_round,
+        mock_save_file,
+        mock_load_file,
+        injected_mock_os_makedirs,
+        mock_args,
+    ):
+        mock_args.plot = True
+        mock_args.plot_dir = "./test_plot_dir"
+        mock_args.plot_max_tensors = 10
+        mock_args.plot_sample_size = 10000
+        mock_parse_args.return_value = mock_args
+
+        mock_load_file.return_value = {"t.weight": torch.randn(2, 2)}
+        mock_stochastic_round.return_value = torch.randn(2, 2).to(torch.float8_e4m3fn)
+
+        xavier.main()
+
+        assert mock_stochastic_round.call_count == 1
+        kwargs_passed_to_round = mock_stochastic_round.call_args.kwargs
+        assert (
+            kwargs_passed_to_round["use_complex_method"] == mock_args.complex_rounding
+        )
+        assert kwargs_passed_to_round["use_shift_perturb_method"] == mock_args.shifturb
+        assert kwargs_passed_to_round["use_owlshift_method"] == mock_args.owlshift
+        assert kwargs_passed_to_round["fp8_dtype"] == torch.float8_e4m3fn
+        assert kwargs_passed_to_round["seed"] == mock_args.seed
+        assert kwargs_passed_to_round["debug_mode"] == mock_args.debug
+
+        injected_mock_os_makedirs.assert_called_once_with(
+            "./test_plot_dir", exist_ok=True
+        )
 
 
 # Further tests to consider:
