@@ -83,8 +83,10 @@ def mock_torchao_integration(monkeypatch):
     mock_quantize_ = mock.Mock(name="quantize_")
 
     # Create mock *classes* using create_autospec. instance=False means it mocks the class itself.
-    MockAQT_class = mock.create_autospec(
-        ActualAffineQuantizedTensor, instance=False, name="MockAQT_class"
+    # For MockAQT_class, use MagicMock with spec to allow more flexible constructor args for the mock class itself,
+    # while its side_effect will return a properly specced instance.
+    MockAQT_class = mock.MagicMock(
+        spec=ActualAffineQuantizedTensor, name="MockAQT_class"
     )
     MockF8L_class = mock.create_autospec(
         ActualFloat8Linear, instance=False, name="MockF8L_class"
@@ -100,6 +102,40 @@ def mock_torchao_integration(monkeypatch):
     MockPerTensor_class = mock.create_autospec(
         ActualPerTensor, instance=False, name="MockPerTensor_class"
     )
+
+    # Side effect for AffineQuantizedTensor mock class constructor
+    def aqt_constructor_side_effect(*args, **kwargs):
+        # Create a mock *instance* that also conforms to the spec of the actual class instance
+        # We don't need to strictly replicate all internal AQT logic,
+        # just enough for xavier.py to interact with it.
+        instance = mock.create_autospec(ActualAffineQuantizedTensor, instance=True)
+        instance.__class__ = (
+            ActualAffineQuantizedTensor  # Make it report its class correctly
+        )
+
+        # Simulate the key attributes xavier.py might interact with for plotting or saving.
+        # tensor_impl is crucial.
+        instance.tensor_impl = mock.MagicMock(name="MockAQTImplInstance_SideEffect")
+        # tensor_impl itself needs 'data' and 'scale' for xavier.py's logic
+        instance.tensor_impl.data = kwargs.get(
+            "data_for_mock", torch.randn(1)
+        )  # Provide a default
+        instance.tensor_impl.scale = kwargs.get(
+            "scale_for_mock", torch.tensor([1.0])
+        )  # Provide a default
+        instance.dtype = instance.tensor_impl.data.dtype  # This should be the fp8 dtype
+
+        # Other attributes based on ActualAffineQuantizedTensor constructor if needed by xavier.py
+        # For now, tensor_impl.data and tensor_impl.scale are the most critical based on typical AQT usage.
+        # If other kwargs are passed, set them.
+        for k, v in kwargs.items():
+            if not hasattr(
+                instance, k
+            ):  # Avoid overwriting spec'd attributes unless intended
+                setattr(instance, k, v)
+        return instance
+
+    MockAQT_class.side_effect = aqt_constructor_side_effect
 
     # Side effect for F8WOConfig_class constructor
     def f8wo_constructor_side_effect(*args, **kwargs):
@@ -140,15 +176,17 @@ def mock_torchao_integration(monkeypatch):
             config, ActualFloat8WeightOnlyConfig
         ):  # Check against actual class for safety if mock is transparent
             # Simulate weight being replaced by an AffineQuantizedTensor-like mock
-            mock_aqt_instance = (
-                MockAQT_class()
-            )  # Create instance from the mocked AQT class
-
-            # Setup .tensor_impl on the instance (AQT instances have .tensor_impl)
-            mock_aqt_instance.tensor_impl = mock.MagicMock(name="MockAQTImplInstance")
-            mock_aqt_instance.tensor_impl.data = model.linear.weight.to(config.weight_dtype)  # type: ignore
-            mock_aqt_instance.tensor_impl.scale = torch.tensor([0.123])
-            model.linear.weight = mock_aqt_instance
+            # Pass dummy data and scale for the mock AQT constructor side effect
+            mock_aqt_instance = MockAQT_class(
+                data_for_mock=model.linear.weight.to(config.weight_dtype),
+                scale_for_mock=torch.tensor([0.123]),  # Example scale
+            )
+            # AffineQuantizedTensor is a Tensor subclass. To assign to an nn.Parameter,
+            # it should be wrapped in nn.Parameter if the original was one.
+            # For the mock, ensuring it's treated as a Parameter is key.
+            model.linear.weight = torch.nn.Parameter(
+                mock_aqt_instance, requires_grad=False
+            )
 
         elif isinstance(config, ActualFloat8DynamicActivationFloat8WeightConfig):
             # Simulate the layer being replaced by a Float8Linear mock instance
@@ -157,8 +195,22 @@ def mock_torchao_integration(monkeypatch):
             )  # Create instance from the mocked F8L class
 
             # Populate required attributes for Float8Linear that xavier.py might access
+            # Ensure the mock Float8Linear's weight is set up to mimic a quantized tensor
+            # for consistent handling in xavier.py, especially if it tries to access .tensor_impl.data
+            # This might mean new_linear_layer_mock.weight itself should be a mock AQT or have similar structure.
+            # For now, let's assume xavier.py will look for .weight and .weight_scale on Float8Linear directly.
             new_linear_layer_mock.weight = model.linear.weight.to(config.weight_dtype)  # type: ignore
             new_linear_layer_mock.weight_scale = torch.tensor([0.456])
+
+            # If xavier.py is expected to find .tensor_impl.data on this weight after dynamic quant,
+            # then new_linear_layer_mock.weight should be a mock_aqt_instance like above.
+            # Let's create one for Float8Linear's weight to be safe, assuming xavier.py might try to access it.
+            mock_f8l_weight_aqt = MockAQT_class(
+                data_for_mock=model.linear.weight.to(config.weight_dtype),
+                scale_for_mock=torch.tensor([0.456]),  # Example scale for F8L weight
+            )
+            new_linear_layer_mock.weight = mock_f8l_weight_aqt
+
             # If xavier.py checks for other attributes like bias, set them up here too.
             # new_linear_layer_mock.bias = model.linear.bias # if bias is handled
             model.linear = new_linear_layer_mock  # Replace the layer in the dummy model
