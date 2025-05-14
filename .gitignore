@@ -3,3 +3,4 @@ plots/
 .pytest_cache/
 __pycache__/
 *.safetensors
+*.png

@@ -84,8 +84,8 @@ failed_runs=0
 
 # Loop through quantization methods
 for quant_method in "${quant_methods[@]}"; do
-    # Loop through FP8 types
-    for fp8_type in "${fp8_types[@]}"; do
+# Loop through FP8 types
+for fp8_type in "${fp8_types[@]}"; do
 
         if [[ "$quant_method" == "native" ]]; then
             # Native method: loop through rounding and scaling
@@ -94,54 +94,54 @@ for quant_method in "${quant_methods[@]}"; do
 
                 for scaling_flag in "${!native_scaling_options[@]}"; do
                     scaling_name="${native_scaling_options[$scaling_flag]}"
-                    
-                    total_runs=$((total_runs + 1))
+            
+            total_runs=$((total_runs + 1))
 
-                    # Construct output filename and plot directory name
+            # Construct output filename and plot directory name
                     run_descriptor="${MODEL_BASENAME}_quant-${quant_method}_fp8-${fp8_type}_round-${rounding_name}_scale-${scaling_name}"
-                    output_model_file="${BASE_OUTPUT_DIR}/${run_descriptor}.safetensors"
-                    plot_dir="${BASE_OUTPUT_DIR}/plots/${run_descriptor}"
+            output_model_file="${BASE_OUTPUT_DIR}/${run_descriptor}.safetensors"
+            plot_dir="${BASE_OUTPUT_DIR}/plots/${run_descriptor}"
 
-                    echo # Blank line for separation
+            echo # Blank line for separation
                     echo "=== Run ${total_runs}: Quant=${quant_method}, FP8=${fp8_type}, Rounding=${rounding_name}, Scaling=${scaling_name} ==="
-                    echo "Output model will be: ${output_model_file}"
-                    echo "Plots will be saved to: ${plot_dir}"
+            echo "Output model will be: ${output_model_file}"
+            echo "Plots will be saved to: ${plot_dir}"
 
-                    mkdir -p "${plot_dir}"
+            mkdir -p "${plot_dir}"
 
-                    # Build the command arguments array
-                    cmd_args=()
+            # Build the command arguments array
+            cmd_args=()
                     cmd_args+=("$XAVIER_SCRIPT")
                     cmd_args+=("$INPUT_FILE")
                     cmd_args+=("$output_model_file")
                     cmd_args+=("--quant_method" "$quant_method")
-                    cmd_args+=("--fp8_type" "$fp8_type")
-                    cmd_args+=("--plot")
-                    cmd_args+=("--plot_dir" "$plot_dir")
-                    cmd_args+=("--device" "$DEVICE")
-                    # cmd_args+=("--debug") # Uncomment for verbose xavier.py output
+            cmd_args+=("--fp8_type" "$fp8_type")
+            cmd_args+=("--plot")
+            cmd_args+=("--plot_dir" "$plot_dir")
+            cmd_args+=("--device" "$DEVICE")
+            # cmd_args+=("--debug") # Uncomment for verbose xavier.py output
 
-                    if [ -n "$rounding_flag" ]; then
-                        cmd_args+=("$rounding_flag")
-                    fi
-                    if [ -n "$scaling_flag" ]; then
-                        cmd_args+=("$scaling_flag")
-                    fi
-                    
-                    echo "Command: $PYTHON_CMD ${cmd_args[*]}"
-                    
-                    # Execute the command
-                    "$PYTHON_CMD" "${cmd_args[@]}"
+            if [ -n "$rounding_flag" ]; then
+                cmd_args+=("$rounding_flag")
+            fi
+            if [ -n "$scaling_flag" ]; then
+                cmd_args+=("$scaling_flag")
+            fi
+            
+            echo "Command: $PYTHON_CMD ${cmd_args[*]}"
+            
+            # Execute the command
+            "$PYTHON_CMD" "${cmd_args[@]}"
 
-                    if [ $? -eq 0 ]; then
-                        echo "Run ${total_runs} successful for ${run_descriptor}."
-                        successful_runs=$((successful_runs + 1))
-                    else
-                        echo "Error: Run ${total_runs} failed for ${run_descriptor}. Check output above."
-                        failed_runs=$((failed_runs + 1))
-                    fi
+            if [ $? -eq 0 ]; then
+                echo "Run ${total_runs} successful for ${run_descriptor}."
+                successful_runs=$((successful_runs + 1))
+            else
+                echo "Error: Run ${total_runs} failed for ${run_descriptor}. Check output above."
+                failed_runs=$((failed_runs + 1))
+            fi
                     echo "======================================================================="
-                done
+        done
             done
         else
             # TorchAO methods: no separate looping for native rounding/scaling

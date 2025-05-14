@@ -296,21 +296,46 @@ def main():
         # This variable will store the scale from torchao if applicable
         scale_factor_for_comfyui_to_save = None
 
-        if args.debug:
-            print(
-                f"DEBUG main loop for tensor {key}: quant_method={args.quant_method}, complex_flag={args.complex_rounding}, shifturb_flag={args.shifturb}, owlshift_flag={args.owlshift}, comfyscale_flag={args.comfyscale}"
+        if args.debug and key == "weight":  # Only for the weight tensor in debug mode
+            print(f"\n  DEBUG Conditions for 'weight' tensor ('{key}'):")
+            print(f"    is_torchao_method: {is_torchao_method}")
+            print(f"    args.quant_method: {args.quant_method}")
+            print(f"    args.keys_to_quantize_suffix: {args.keys_to_quantize_suffix}")
+            _any_suffix_match = any(
+                key.endswith(s) for s in args.keys_to_quantize_suffix
             )
-            if tensor.numel() > 0:
-                print(
-                    f"  Tensor {key} before any processing: min={tensor.min().item():.4g}, max={tensor.max().item():.4g}, mean={tensor.mean().item():.4g}, isfinite={torch.isfinite(tensor).all().item()}, dtype={tensor.dtype}"
-                )
-            else:
-                print(f"  Tensor {key} is empty.")
+            print(
+                f"    any(key.endswith(s) for s in args.keys_to_quantize_suffix): {_any_suffix_match}"
+            )
+            _is_fp = tensor.is_floating_point()
+            print(f"    tensor.is_floating_point(): {_is_fp}")
+            print(f"    tensor.dim(): {tensor.dim()}")
 
-        print(
-            f"Processing tensor {i+1}/{total_tensors}: {key} (dtype: {tensor.dtype}, shape: {tensor.shape})",
-            end="",
-        )
+            # Native Comfyscale Path condition components
+            print(f"    Condition (Native Comfyscale Path):")
+            _args_comfyscale = args.comfyscale
+            print(f"      args.comfyscale: {_args_comfyscale}")
+            _not_is_torchao = not is_torchao_method
+            print(f"      not is_torchao_method: {_not_is_torchao}")
+            # _any_suffix_match is already printed
+            # _is_fp is already printed
+            _not_bias = not key.endswith(".bias")
+            print(f"      not key.endswith('.bias'): {_not_bias}")
+            full_cond_native_comfy = (
+                _args_comfyscale
+                and _not_is_torchao
+                and _any_suffix_match
+                and _is_fp
+                and _not_bias
+            )
+            print(f"      => EVALUATES TO: {full_cond_native_comfy}")
+
+            # Native General Path condition components
+            print(f"    Condition (Native General Path):")
+            # _not_is_torchao, _any_suffix_match, _is_fp are already printed
+            full_cond_native_general = _not_is_torchao and _any_suffix_match and _is_fp
+            print(f"      => EVALUATES TO: {full_cond_native_general}")
+            print("  DEBUG End of conditions block.")
 
         original_tensor_device = tensor.device
         tensor_to_process = tensor.to(main_device)
@@ -403,23 +428,32 @@ def main():
                 if is_f8l_dynamic_case:
                     # This branch is for Float8DynamicActivationFloat8WeightConfig.
                     # The layer itself (quantized_layer_or_param) is of type Float8Linear (or its mock).
+                    # Its .weight attribute should be a Float8Tensor (or similar) holding .data and .scale
                     if (
-                        hasattr(quantized_layer_or_param, "weight")
-                        and hasattr(quantized_layer_or_param.weight, "tensor_impl")
-                        and hasattr(quantized_layer_or_param.weight.tensor_impl, "data")
+                        hasattr(
+                            quantized_layer_or_param, "weight"
+                        )  # Check if Float8Linear has a weight attribute
                         and hasattr(
-                            quantized_layer_or_param.weight.tensor_impl, "scale"
-                        )
+                            quantized_layer_or_param.weight, "data"
+                        )  # Check if the weight object has .data
+                        and hasattr(
+                            quantized_layer_or_param.weight, "scale"
+                        )  # Check if the weight object has .scale
                     ):
                         final_quantized_tensor_data_ao = (
-                            quantized_layer_or_param.weight.tensor_impl.data
+                            quantized_layer_or_param.weight.data
                         )
-                        final_scale_ao = (
-                            quantized_layer_or_param.weight.tensor_impl.scale
-                        )
+                        final_scale_ao = quantized_layer_or_param.weight.scale
+                        if args.debug:
+                            print(
+                                f"  DEBUG ({key}): initial final_quantized_tensor_data_ao type: {type(final_quantized_tensor_data_ao).__name__}"
+                            )
+                            print(
+                                f"  DEBUG ({key}): initial final_scale_ao type: {type(final_scale_ao).__name__}"
+                            )
                     else:
                         print(
-                            f" Warning: Object potentially identified as Float8Linear (mock or real) does not have expected structure (.weight.tensor_impl.data/scale). Key: {key}. Copying original.",
+                            f" Warning: Object potentially identified as Float8Linear (mock or real) does not have expected structure (.weight.data / .weight.scale). Key: {key}. Copying original.",
                             end="",
                         )
                         quantized_state_dict[key] = tensor.to(original_tensor_device)
@@ -428,50 +462,110 @@ def main():
 
                 # Case 2: Weight-only quantization for nn.Linear (layer is nn.Linear, weight is AQT)
                 elif is_aqt_weight_only_case:
-                    # This branch is for Float8WeightOnlyConfig.
-                    # The layer (quantized_layer_or_param) is still nn.Linear, but its .weight is an AffineQuantizedTensor.
-                    if (
-                        hasattr(quantized_layer_or_param.weight, "tensor_impl")
-                        and hasattr(quantized_layer_or_param.weight.tensor_impl, "data")
-                        and hasattr(
-                            quantized_layer_or_param.weight.tensor_impl, "scale"
-                        )
-                    ):
-                        final_quantized_tensor_data_ao = (
-                            quantized_layer_or_param.weight.tensor_impl.data
-                        )
-                        final_scale_ao = (
-                            quantized_layer_or_param.weight.tensor_impl.scale
-                        )
+                    aqt_weight = (
+                        quantized_layer_or_param.weight
+                    )  # This is the AffineQuantizedTensor
+                    if aqt_weight is None:
+                        if args.debug:
+                            print(f"  DEBUG: aqt_weight for {key} is None. Skipping.")
                     else:
-                        print(
-                            f" Warning: Object's weight potentially identified as AffineQuantizedTensor (mock or real) does not have expected structure (.tensor_impl.data/scale). Key: {key}. Copying original.",
-                            end="",
-                        )
-                        quantized_state_dict[key] = tensor.to(original_tensor_device)
-                        print(" Done.")
-                        continue
+                        if args.debug:
+                            print(
+                                f"\n  DEBUG: Type of aqt_weight for {key}: {type(aqt_weight).__name__}"
+                            )
+                            print(
+                                f"  DEBUG: Attributes of aqt_weight for {key}: {dir(aqt_weight)}\n"
+                            )
+
+                        if hasattr(aqt_weight, "tensor_impl"):
+                            impl = aqt_weight.tensor_impl
+                            if hasattr(impl, "data") and hasattr(impl, "scale"):
+                                potential_fp8_tensor = impl.data
+                                if (
+                                    hasattr(potential_fp8_tensor, "dtype")
+                                    and potential_fp8_tensor.dtype == fp8_dtype
+                                ):
+                                    final_quantized_tensor_data_ao = (
+                                        potential_fp8_tensor
+                                    )
+                                    final_scale_ao = impl.scale
+                                    if args.debug:
+                                        print(
+                                            f"  DEBUG ({key} AQT.weight): final_quantized_tensor_data_ao type: {type(final_quantized_tensor_data_ao).__name__}"
+                                        )
+                                        print(
+                                            f"  DEBUG ({key} AQT.weight): final_scale_ao type: {type(final_scale_ao).__name__}"
+                                        )
+                                    # Successfully extracted FP8 data and its scale
+                                else:
+                                    print(
+                                        f" Warning: AQT weight's tensor_impl.data for {key} is not FP8 (dtype: {getattr(potential_fp8_tensor, 'dtype', 'N/A')}). Original AQT wrapper dtype: {getattr(aqt_weight, 'dtype', 'N/A')}. Copying original.",
+                                        end="",
+                                    )
+                            else:
+                                print(
+                                    f" Warning: AQT weight's tensor_impl for {key} does not have expected .data / .scale attributes. Original AQT wrapper dtype: {getattr(aqt_weight, 'dtype', 'N/A')}. Copying original.",
+                                    end="",
+                                )
+                        else:
+                            print(
+                                f" Warning: AQT weight for {key} (type: {type(aqt_weight).__name__}) does not have .tensor_impl attribute. Original AQT wrapper dtype: {getattr(aqt_weight, 'dtype', 'N/A')}. Copying original.",
+                                end="",
+                            )
 
                 # Case 3: Tensor is a Parameter and directly an AffineQuantizedTensor
                 elif is_aqt_param_case:  # quantized_layer_or_param is Parameter and AQT
-                    # This implies the Parameter itself was converted to AQT
-                    if (
-                        hasattr(quantized_layer_or_param, "tensor_impl")
-                        and hasattr(quantized_layer_or_param.tensor_impl, "data")
-                        and hasattr(quantized_layer_or_param.tensor_impl, "scale")
-                    ):
-                        final_quantized_tensor_data_ao = (
-                            quantized_layer_or_param.tensor_impl.data
-                        )
-                        final_scale_ao = quantized_layer_or_param.tensor_impl.scale
+                    aqt_param = (
+                        quantized_layer_or_param  # This is the AffineQuantizedTensor
+                    )
+                    if aqt_param is None:
+                        if args.debug:
+                            print(f"  DEBUG: aqt_param for {key} is None. Skipping.")
                     else:
-                        print(
-                            f" Warning: Parameter potentially identified as AffineQuantizedTensor (mock or real) does not have expected structure (.tensor_impl.data/scale). Key: {key}. Copying original.",
-                            end="",
-                        )
-                        quantized_state_dict[key] = tensor.to(original_tensor_device)
-                        print(" Done.")
-                        continue
+                        if args.debug:
+                            print(
+                                f"\n  DEBUG: Type of aqt_param for {key}: {type(aqt_param).__name__}"
+                            )
+                            print(
+                                f"  DEBUG: Attributes of aqt_param for {key}: {dir(aqt_param)}\n"
+                            )
+
+                        if hasattr(aqt_param, "tensor_impl"):
+                            impl = aqt_param.tensor_impl
+                            if hasattr(impl, "data") and hasattr(impl, "scale"):
+                                potential_fp8_tensor = impl.data
+                                if (
+                                    hasattr(potential_fp8_tensor, "dtype")
+                                    and potential_fp8_tensor.dtype == fp8_dtype
+                                ):
+                                    final_quantized_tensor_data_ao = (
+                                        potential_fp8_tensor
+                                    )
+                                    final_scale_ao = impl.scale
+                                    if args.debug:
+                                        print(
+                                            f"  DEBUG ({key} AQT.param): final_quantized_tensor_data_ao type: {type(final_quantized_tensor_data_ao).__name__}"
+                                        )
+                                        print(
+                                            f"  DEBUG ({key} AQT.param): final_scale_ao type: {type(final_scale_ao).__name__}"
+                                        )
+                                    # Successfully extracted FP8 data and its scale
+                                else:
+                                    print(
+                                        f" Warning: AQT param's tensor_impl.data for {key} is not FP8 (dtype: {getattr(potential_fp8_tensor, 'dtype', 'N/A')}). Original AQT wrapper dtype: {getattr(aqt_param, 'dtype', 'N/A')}. Copying original.",
+                                        end="",
+                                    )
+                            else:
+                                print(
+                                    f" Warning: AQT param's tensor_impl for {key} does not have expected .data / .scale attributes. Original AQT wrapper dtype: {getattr(aqt_param, 'dtype', 'N/A')}. Copying original.",
+                                    end="",
+                                )
+                        else:
+                            print(
+                                f" Warning: AQT param for {key} (type: {type(aqt_param).__name__}) does not have .tensor_impl attribute. Original AQT wrapper dtype: {getattr(aqt_param, 'dtype', 'N/A')}. Copying original.",
+                                end="",
+                            )
+
                 else:
                     # Fallback: Did not match expected TorchAO structures after quantization call.
                     print(
@@ -493,6 +587,10 @@ def main():
                     cloned_final_quantized_tensor_data_ao = (
                         final_quantized_tensor_data_ao.clone().detach()
                     )
+                    if args.debug:
+                        print(
+                            f"  DEBUG ({key}): cloned_final_quantized_tensor_data_ao type: {type(cloned_final_quantized_tensor_data_ao).__name__}"
+                        )
 
                     if "comfyscale" in args.quant_method:
                         print(f" (Adapting to ComfyUI scale convention)...", end="")
@@ -565,63 +663,202 @@ def main():
                         processed_fp8_tensor is not None
                         and processed_scale_factor is not None
                     ):
-                        quantized_state_dict[key] = processed_fp8_tensor.to(
-                            original_tensor_device
-                        )
-                        scale_factor_for_comfyui_to_save = processed_scale_factor.to(
-                            original_tensor_device
-                        )
+                        # Ensure the tensors stored are plain tensors for safetensors compatibility
 
-                        _scale_key_to_use_ = ""
-                        scale_key_parts = key.split(".")
-                        if scale_key_parts[-1] == "weight":
-                            scale_key_parts[-1] = "scale_weight"
-                            _scale_key_to_use_ = ".".join(scale_key_parts)
-                        else:
-                            _scale_key_to_use_ = key + ".scale_absmax"
-
-                        if _scale_key_to_use_ != key:
-                            quantized_state_dict[_scale_key_to_use_] = (
-                                scale_factor_for_comfyui_to_save
+                        # processed_fp8_tensor is on main_device (e.g., CUDA) and might be a TorchAO wrapper
+                        # Access the underlying data if it's a known TorchAO wrapper
+                        underlying_data_tensor = None
+                        # Order of checks: AQT -> direct .data (for Float8Tensor/Impl) -> ._data (fallback)
+                        if (
+                            isinstance(processed_fp8_tensor, AffineQuantizedTensor)
+                            and hasattr(processed_fp8_tensor, "tensor_impl")
+                            and hasattr(processed_fp8_tensor.tensor_impl, "data")
+                        ):
+                            print(
+                                f"  DEBUG ({key}): Extracting .tensor_impl.data from AffineQuantizedTensor ({type(processed_fp8_tensor).__name__})"
                             )
-                            scale_repr = (
-                                str(scale_factor_for_comfyui_to_save.item())
-                                if scale_factor_for_comfyui_to_save.numel() == 1
-                                else str(scale_factor_for_comfyui_to_save.tolist())
+                            underlying_data_tensor = (
+                                processed_fp8_tensor.tensor_impl.data
+                            )
+                        elif hasattr(processed_fp8_tensor, "data") and isinstance(
+                            getattr(processed_fp8_tensor, "data", None), torch.Tensor
+                        ):
+                            # This handles cases like Float8AQTTensorImpl or Float8Tensor which have a .data attribute directly
+                            print(
+                                f"  DEBUG ({key}): Extracting .data directly from {type(processed_fp8_tensor).__name__}"
+                            )
+                            underlying_data_tensor = processed_fp8_tensor.data
+                        elif hasattr(
+                            processed_fp8_tensor, "_data"
+                        ):  # Fallback for other AQT-like types
+                            print(
+                                f"  DEBUG ({key}): Extracting ._data from {type(processed_fp8_tensor).__name__}"
+                            )
+                            underlying_data_tensor = processed_fp8_tensor._data
+                        else:  # Assume it might be a plain tensor already, or a different wrapper
+                            print(
+                                f"  DEBUG ({key}): Using processed_fp8_tensor directly, type: {type(processed_fp8_tensor).__name__}"
+                            )
+                            underlying_data_tensor = processed_fp8_tensor
+
+                        if underlying_data_tensor is None:
+                            print(
+                                f"  ERROR ({key}): Could not extract underlying tensor from {type(processed_fp8_tensor).__name__}. Skipping save logic for this tensor."
+                            )
+                            # Potentially raise an error or handle more gracefully if this is unexpected
+                            continue  # Skip to next tensor in the main loop, might need adjustment based on where this edit is placed
+
+                        detached_fp8_on_main_device = underlying_data_tensor.detach()
+
+                        # 1. Move underlying tensor to CPU (if not already)
+                        print(
+                            f"  DEBUG: Calling .cpu() on underlying_data_tensor (type: {type(detached_fp8_on_main_device)}) for {key}"
+                        )
+                        detached_fp8_cpu = detached_fp8_on_main_device.cpu()
+
+                        # 2. Create a new plain tensor on CPU and copy data from the (now CPU) underlying tensor
+                        plain_fp8_cpu = torch.empty(
+                            detached_fp8_cpu.shape,
+                            dtype=detached_fp8_cpu.dtype,
+                            device="cpu",
+                        )
+                        try:
+                            plain_fp8_cpu.copy_(
+                                detached_fp8_cpu
+                            )  # This is the critical copy
+                        except AttributeError as e:
+                            # Intercept the specific 'transposed' AttributeError to provide a more direct hypothesis
+                            if "'Tensor' object has no attribute 'transposed'" in str(
+                                e
+                            ):
+                                print(
+                                    f"  ERROR HINT: The .copy_ operation from a TorchAO tensor (even on CPU) to a plain CPU tensor failed. {key}"
+                                )
+                                print(
+                                    f"              This suggests TorchAO's __torch_dispatch__ for copy_ expects attributes plain tensors don't have."
+                                )
+                                print(
+                                    f"              Source (TorchAO tensor on CPU) type: {type(detached_fp8_cpu)}"
+                                )
+                                print(
+                                    f"              Dest (Plain tensor on CPU) type: {type(plain_fp8_cpu)}"
+                                )
+                            raise  # Re-raise the original error after printing hint
+
+                        # 3. Move the plain CPU tensor to the original target device
+                        plain_fp8_for_saving = plain_fp8_cpu.to(original_tensor_device)
+                        quantized_state_dict[key] = plain_fp8_for_saving
+
+                        # Ensure scale is also a plain tensor (scales are usually simpler)
+                        # processed_scale_factor could be a TorchAO scale tensor or a plain tensor
+                        underlying_scale_tensor = None
+                        # Scales are usually plain tensors or simple wrappers. If it came from Float8Tensor.scale, it should be plain.
+                        if (
+                            hasattr(processed_scale_factor, "data")
+                            and isinstance(
+                                getattr(processed_scale_factor, "data", None),
+                                torch.Tensor,
+                            )
+                            and not isinstance(processed_scale_factor, torch.Tensor)
+                        ):
+                            # This might catch a wrapped scale tensor that isn't a plain tensor but has .data
+                            print(
+                                f"  DEBUG ({key} scale): Extracting .data from scale object {type(processed_scale_factor).__name__}"
+                            )
+                            underlying_scale_tensor = processed_scale_factor.data
+                        elif isinstance(processed_scale_factor, torch.Tensor):
+                            print(
+                                f"  DEBUG ({key} scale): Using scale directly, type: {type(processed_scale_factor).__name__}"
+                            )
+                            underlying_scale_tensor = processed_scale_factor
+                        else:
+                            # Fallback if it's some other type of object we don't expect for a scale
+                            print(
+                                f"  WARNING ({key} scale): processed_scale_factor is of unexpected type {type(processed_scale_factor).__name__}. Attempting to use as is."
+                            )
+                            underlying_scale_tensor = processed_scale_factor  # May cause issues later if not a tensor
+
+                        if underlying_scale_tensor is None or not isinstance(
+                            underlying_scale_tensor, torch.Tensor
+                        ):
+                            print(
+                                f"  ERROR ({key} scale): Could not obtain a valid underlying tensor for scale from {type(processed_scale_factor).__name__}. Skipping save logic for this scale."
+                            )
+                            # This tensor (key) might end up saved without its scale if this path is hit.
+                            # The main loop will continue, but verification might fail or behavior might be wrong.
+                            # Consider how to handle this, e.g. by not saving the key at all if scale is bad.
+                        else:
+                            detached_scale_on_main_device = (
+                                underlying_scale_tensor.detach()
                             )
                             print(
-                                f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale saved as {_scale_key_to_use_}: {scale_repr}"
+                                f"  DEBUG: Calling .cpu() on underlying_scale_tensor (type: {type(detached_scale_on_main_device)}) for {key}'s scale"
                             )
-                        else:
-                            print(
-                                f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale for {key} not saved separately (key conflict). Print scale: {str(scale_factor_for_comfyui_to_save)}"
-                            )
-                        quantized_count += 1
-                    # else: this case should be covered if processed_fp8_tensor or processed_scale_factor becomes None
+                            detached_scale_cpu = detached_scale_on_main_device.cpu()
 
-                elif (
-                    final_quantized_tensor_data_ao is not None
-                    and final_scale_ao is None
-                ):
+                            plain_scale_cpu = torch.empty(
+                                detached_scale_cpu.shape,
+                                dtype=detached_scale_cpu.dtype,
+                                device="cpu",
+                            )
+                            plain_scale_cpu.copy_(
+                                detached_scale_cpu
+                            )  # Scales are less likely to be complex wrappers
+                            plain_scale_for_saving = plain_scale_cpu.to(
+                                original_tensor_device
+                            )
+                            scale_factor_for_comfyui_to_save = plain_scale_for_saving
+
+                            _scale_key_to_use_ = ""
+                            scale_key_parts = key.split(".")
+                            if scale_key_parts[-1] == "weight":
+                                scale_key_parts[-1] = "scale_weight"
+                                _scale_key_to_use_ = ".".join(scale_key_parts)
+                            else:
+                                _scale_key_to_use_ = key + ".scale_absmax"
+
+                            if _scale_key_to_use_ != key:
+                                quantized_state_dict[_scale_key_to_use_] = (
+                                    scale_factor_for_comfyui_to_save
+                                )
+                                scale_repr = (
+                                    str(scale_factor_for_comfyui_to_save.item())
+                                    if scale_factor_for_comfyui_to_save.numel() == 1
+                                    else str(scale_factor_for_comfyui_to_save.tolist())
+                                )
+                                print(
+                                    f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale saved as {_scale_key_to_use_}: {scale_repr}"
+                                )
+                            else:
+                                print(
+                                    f" Done. New dtype: {quantized_state_dict[key].dtype}. Scale for {key} not saved separately (key conflict). Print scale: {str(scale_factor_for_comfyui_to_save)}"
+                                )
+                            quantized_count += 1
+                        # else: this case should be covered if processed_fp8_tensor or processed_scale_factor becomes None
+
+                    elif (
+                        final_quantized_tensor_data_ao is not None
+                        and final_scale_ao is None
+                    ):
+                        print(
+                            f" Warning: TorchAO quantized {key} to {fp8_dtype} but scale not found directly. Scale factor cannot be adapted or saved. Copying original.",
+                            end="",
+                        )
+                        quantized_state_dict[key] = tensor.to(original_tensor_device)
+                        print(" Done.")
+                    # The case where final_quantized_tensor_data_ao is None is handled by the initial check after getting AQT/Float8Tensor components
+
+                else:  # Should not happen if args.quant_method is valid and contains torchao_
                     print(
-                        f" Warning: TorchAO quantized {key} to {fp8_dtype} but scale not found directly. Scale factor cannot be adapted or saved. Copying original.",
+                        f" Error: No TorchAO config for method '{args.quant_method}'. Copying original.",
                         end="",
                     )
                     quantized_state_dict[key] = tensor.to(original_tensor_device)
                     print(" Done.")
-                # The case where final_quantized_tensor_data_ao is None is handled by the initial check after getting AQT/Float8Tensor components
 
-            else:  # Should not happen if args.quant_method is valid and contains torchao_
-                print(
-                    f" Error: No TorchAO config for method '{args.quant_method}'. Copying original.",
-                    end="",
-                )
-                quantized_state_dict[key] = tensor.to(original_tensor_device)
-                print(" Done.")
-
-            del dummy_model
-            if "torchao_config" in locals():
-                del torchao_config
+                del dummy_model
+                if "torchao_config" in locals():
+                    del torchao_config
 
         elif should_attempt_torchao and tensor_to_process.dim() < 2:
             # This case is when TorchAO was desired but tensor dimension is too low
@@ -778,59 +1015,136 @@ def main():
             scale_for_plot_display = 1.0  # Default for native, or if TorchAO scale cannot be determined for display
 
             if is_torchao_method:
-                # For TorchAO, AffineQuantizedTensor has a dequantize method
-                if hasattr(quantized_tensor_cpu_for_plot, "dequantize"):
-                    dequantized_tensor_cpu_for_plot = (
-                        quantized_tensor_cpu_for_plot.dequantize().to(
-                            original_tensor_cpu_for_plot.dtype
-                        )
+                # `quantized_tensor_cpu_for_plot` is what was stored in quantized_state_dict[key].cpu()
+                # We suspect this is still a TorchAO wrapper despite efforts to make it plain for safetensors.
+                # For plotting, we need to access its underlying plain FP8 data.
+
+                plain_fp8_for_plotting = None
+
+                # Try to access tensor_impl.data, similar to the main loop
+                if hasattr(quantized_tensor_cpu_for_plot, "tensor_impl") and hasattr(
+                    quantized_tensor_cpu_for_plot.tensor_impl, "data"
+                ):
+                    potential_plain_data = (
+                        quantized_tensor_cpu_for_plot.tensor_impl.data
                     )
-                    # Try to get scale for plot title/info, if available
-                    if hasattr(quantized_tensor_cpu_for_plot, "_scale"):
-                        if (
-                            isinstance(
-                                quantized_tensor_cpu_for_plot._scale, torch.Tensor
-                            )
-                            and quantized_tensor_cpu_for_plot._scale.numel() == 1
-                        ):
-                            scale_for_plot_display = (
-                                quantized_tensor_cpu_for_plot._scale.item()
-                            )
-                        elif isinstance(
-                            quantized_tensor_cpu_for_plot._scale, (int, float)
-                        ):
-                            scale_for_plot_display = (
-                                quantized_tensor_cpu_for_plot._scale
-                            )
-                    elif (
-                        "comfyscale" in args.quant_method
-                    ):  # Attempt to retrieve comfyscale factor if used with torchao
-                        # This logic assumes scale_factor_for_comfyui_to_save might be relevant if torchao_comfyscale was used
-                        # and it stored the scale in a way that this variable captures it (might need adjustment based on actual storage)
-                        if scale_factor_for_comfyui_to_save is not None:
-                            scale_for_plot_display = (
-                                scale_factor_for_comfyui_to_save.cpu().item()
-                            )
+                    if isinstance(
+                        potential_plain_data, torch.Tensor
+                    ) and potential_plain_data.dtype in [
+                        torch.float8_e4m3fn,
+                        torch.float8_e5m2,
+                    ]:
+                        plain_fp8_for_plotting = potential_plain_data
+                    else:
+                        print(
+                            f"      Warning: Plotting: {key}'s .tensor_impl.data is not a plain FP8 tensor (dtype: {getattr(potential_plain_data, 'dtype', 'N/A')})."
+                        )
+                elif hasattr(
+                    quantized_tensor_cpu_for_plot, "_data"
+                ):  # Fallback to _data
+                    potential_plain_data = quantized_tensor_cpu_for_plot._data
+                    if isinstance(
+                        potential_plain_data, torch.Tensor
+                    ) and potential_plain_data.dtype in [
+                        torch.float8_e4m3fn,
+                        torch.float8_e5m2,
+                    ]:
+                        plain_fp8_for_plotting = potential_plain_data
+                        print(f"      Info: Plotting: Used ._data for {key}.")
+                    else:
+                        print(
+                            f"      Warning: Plotting: {key}'s ._data is not a plain FP8 tensor (dtype: {getattr(potential_plain_data, 'dtype', 'N/A')})."
+                        )
+                else:  # If still no plain data, we might be in trouble for plotting this tensor accurately
+                    print(
+                        f"      Warning: Plotting: Could not access underlying plain FP8 data for {key} (type: {type(quantized_tensor_cpu_for_plot).__name__}). Attempting to use the object directly."
+                    )
+                    plain_fp8_for_plotting = (
+                        quantized_tensor_cpu_for_plot  # Last resort, might error
+                    )
+
+                retrieved_scale_for_plotting = None
+                scale_display_value = 1.0  # Default for plot title
+
+                _scale_key_to_use_plot_ = ""
+                scale_key_parts_plot = key.split(".")
+                if scale_key_parts_plot[-1] == "weight":
+                    scale_key_parts_plot[-1] = "scale_weight"
+                    _scale_key_to_use_plot_ = ".".join(scale_key_parts_plot)
+                else:
+                    _scale_key_to_use_plot_ = key + ".scale_absmax"
+
+                if _scale_key_to_use_plot_ in quantized_state_dict:
+                    retrieved_scale_for_plotting = quantized_state_dict[
+                        _scale_key_to_use_plot_
+                    ].cpu()
+                    if not isinstance(retrieved_scale_for_plotting, torch.Tensor):
+                        print(
+                            f"     Warning: Retrieved scale for {key} is not a tensor, type: {type(retrieved_scale_for_plotting)}"
+                        )
+                        retrieved_scale_for_plotting = (
+                            None  # Invalidate if not a tensor
+                        )
                 else:
                     print(
-                        f"      Warning: TorchAO-quantized tensor {key} does not have a .dequantize() method. Plotting may be inaccurate."
+                        f"      Warning: Plotting for TorchAO tensor {key}, but its specific scale key '{_scale_key_to_use_plot_}' not found in quantized_state_dict. Plot may be inaccurate if it relied on this scale."
                     )
-                    # Fallback: try to cast to original dtype, but this is unlikely to be meaningful without dequant
-                    dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
-                        original_tensor_cpu_for_plot.dtype
+
+                if (
+                    plain_fp8_for_plotting is not None
+                    and retrieved_scale_for_plotting is not None
+                ):
+                    try:
+                        dequant_hp_plot = plain_fp8_for_plotting.to(
+                            torch.float32
+                        ) * retrieved_scale_for_plotting.to(torch.float32)
+                        dequantized_tensor_cpu_for_plot = dequant_hp_plot.to(
+                            original_tensor_cpu_for_plot.dtype
+                        )
+
+                        if retrieved_scale_for_plotting.numel() == 1:
+                            scale_display_value = retrieved_scale_for_plotting.item()
+                        else:
+                            scale_display_value = torch.norm(
+                                retrieved_scale_for_plotting.float()
+                            ).item()
+                            # print(f"      Note: Using norm of per-channel scale for plot display title for {key}.") # User commented out debug prints
+                    except Exception as e:
+                        print(
+                            f"      Error during dequantization for plotting {key}: {e}. Using fallback."
+                        )
+                        dequantized_tensor_cpu_for_plot = plain_fp8_for_plotting.to(
+                            original_tensor_cpu_for_plot.dtype
+                        )  # Fallback to direct cast
+                        scale_display_value = 1.0
+                else:
+                    print(
+                        f"      Fallback: Could not retrieve plain FP8 data or scale for TorchAO tensor {key} for plotting. Using direct cast of the (potentially wrapped) FP8 tensor."
                     )
+                    # This direct cast on plain_fp8_for_plotting might still fail if it's a wrapper and not plain_fp8_data
+                    if plain_fp8_for_plotting is not None:
+                        try:
+                            dequantized_tensor_cpu_for_plot = plain_fp8_for_plotting.to(
+                                original_tensor_cpu_for_plot.dtype
+                            )
+                        except Exception as e:
+                            print(
+                                f"        Error during fallback direct cast for plotting {key}: {e}"
+                            )
+                            dequantized_tensor_cpu_for_plot = None  # Cannot plot
+                    else:
+                        dequantized_tensor_cpu_for_plot = None  # Cannot plot
+                    scale_display_value = 1.0
             else:  # Native methods dequantization
-                # For comfyscale, the input to stochastic_round_tensor_to_fp8 was already scaled.
-                # Dequantization is multiplication by scale.
+                # Native dequantization logic (already uses scale_factor_for_comfyui_to_save or direct cast)
+                # It also sets `scale_for_plot_display` which we should rename to `scale_display_value` for consistency.
                 if (
                     args.comfyscale
-                    and scale_factor_for_comfyui_to_save
-                    is not None  # This is the scale from native comfyscale path
+                    and scale_factor_for_comfyui_to_save  # This is the scale from native comfyscale path
+                    is not None
                     and not key.endswith(".bias")
                 ):
-                    scale_for_plot_display = (
-                        scale_factor_for_comfyui_to_save.cpu().item()
-                    )
+                    scale_display_value = scale_factor_for_comfyui_to_save.cpu().item()
                     dequantized_tensor_cpu_for_plot = (
                         quantized_tensor_cpu_for_plot.to(
                             scale_factor_for_comfyui_to_save.dtype  # Use scale's dtype for intermediate mult
@@ -843,9 +1157,12 @@ def main():
                     dequantized_tensor_cpu_for_plot = quantized_tensor_cpu_for_plot.to(
                         original_tensor_cpu_for_plot.dtype
                     )
+                    scale_display_value = (
+                        1.0  # Reflects direct cast without explicit scale
+                    )
 
             # The generate_comparison_plots function expects a 'scale_value' for its title.
-            # We've prepared 'scale_for_plot_display' for this purpose.
+            # We've prepared 'scale_display_value' for this purpose.
 
             if dequantized_tensor_cpu_for_plot is not None:
                 safe_tensor_key_for_filename = key.replace("/", "_").replace(".", "_")
@@ -864,7 +1181,6 @@ def main():
                     original_dtype_str=original_dtype_name,
                     fp8_dtype_str=fp8_dtype_name,
                     sample_size=args.plot_sample_size,
-                    scale_value=scale_for_plot_display,  # Pass the determined scale for display
                 )
                 plots_generated_count += 1
             else:
