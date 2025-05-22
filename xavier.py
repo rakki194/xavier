@@ -708,11 +708,29 @@ def main():
                             # Potentially raise an error or handle more gracefully if this is unexpected
                             continue  # Skip to next tensor in the main loop, might need adjustment based on where this edit is placed
 
-                        detached_fp8_on_main_device = underlying_data_tensor.detach()
+                        # Tensor to be detached and moved to CPU. Initially the underlying_data_tensor.
+                        tensor_for_cpu_move = underlying_data_tensor
+
+                        # Check if dequantization is needed before moving to CPU
+                        # Specifically for Float8AQTTensorImpl which causes issues with .cpu()
+                        if type(tensor_for_cpu_move).__name__ == "Float8AQTTensorImpl":
+                            if hasattr(tensor_for_cpu_move, "dequantize") and callable(
+                                getattr(tensor_for_cpu_move, "dequantize")
+                            ):
+                                print(
+                                    f"  DEBUG ({key}): Dequantizing {type(tensor_for_cpu_move).__name__} before .cpu() call."
+                                )
+                                tensor_for_cpu_move = tensor_for_cpu_move.dequantize()
+                            else:
+                                print(
+                                    f"  WARNING ({key}): {type(tensor_for_cpu_move).__name__} is problematic for .cpu() but does not have a dequantize method. .cpu() might fail."
+                                )
+
+                        detached_fp8_on_main_device = tensor_for_cpu_move.detach()
 
                         # 1. Move underlying tensor to CPU (if not already)
                         print(
-                            f"  DEBUG: Calling .cpu() on underlying_data_tensor (type: {type(detached_fp8_on_main_device)}) for {key}"
+                            f"  DEBUG: Calling .cpu() on tensor (type: {type(detached_fp8_on_main_device)}) for {key}"
                         )
                         detached_fp8_cpu = detached_fp8_on_main_device.cpu()
 
